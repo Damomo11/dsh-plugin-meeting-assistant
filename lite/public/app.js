@@ -352,15 +352,34 @@ async function renderSettings() {
 }
 
 // ===================== 录音（会中） =====================
+function micError(e) {
+  switch (e?.name) {
+    case 'NotAllowedError':
+    case 'SecurityError':
+      return '麦克风权限被拒。请在浏览器地址栏右侧的图标里允许麦克风，或用系统默认浏览器打开 http://127.0.0.1:8787 再试。';
+    case 'NotFoundError': return '没找到麦克风设备，请检查是否已连接。';
+    case 'NotReadableError': return '麦克风被别的应用占用，关掉占用的程序再试。';
+    default: return e instanceof Error ? e.message : String(e);
+  }
+}
+
 async function startRecording() {
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
+  } catch (e) {
+    toast(micError(e));
+    return;
+  }
+  // 拿到麦克风再建录音，权限失败不留空场
+  let context, node;
   try {
     await api('brief', { ...brief, cwd: brief.cwd, autoEnabled: brief.autoEnabled, __touch: 1 }).catch(() => { });
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
-    const context = new AudioContext();
+    context = new AudioContext();
     await context.resume();
     await context.audioWorklet.addModule('/worklet.js');
     const source = context.createMediaStreamSource(stream);
-    const node = new AudioWorkletNode(context, 'meeting-assistant');
+    node = new AudioWorkletNode(context, 'meeting-assistant');
     const started = await api('start');
     capture = { stream, context, node, token: started.token, startedAt: Date.now(), sequence: 0 };
     node.port.onmessage = async ev => {
@@ -379,6 +398,9 @@ async function startRecording() {
     activeRecordingId = started.recording.id;
     renderLive();
   } catch (e) {
+    // server 或音频链路失败：立刻释放刚拿到的麦克风
+    stream.getTracks().forEach(t => t.stop());
+    context?.close?.().catch?.(() => { });
     toast(`无法开始：${e.message}`);
   }
 }
