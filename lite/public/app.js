@@ -362,6 +362,7 @@ function renderLive() {
         <span class="grow"></span>
         <button id="regenBtn">生成</button>
       </div>
+      <div id="speechStream"></div>
       <div id="askedOfMe"><div class="empty">暂无建议</div></div>
     </div>
     <div id="viewAsk" style="display:none"><div id="askOthers"><div class="empty">暂无</div></div></div>
@@ -370,6 +371,8 @@ function renderLive() {
   $('#regenBtn').onclick = async () => {
     const btn = $('#regenBtn');
     btn.disabled = true; btn.textContent = '分析中…';
+    speechBuffer = '';
+    $('#speechStream').innerHTML = '';
     try { await api('coach/generate', { recordingId: rid }); } catch (e) { toast(e.message); btn.disabled = false; btn.textContent = '生成'; return; }
     // 密集轮询到结果出现（最长 90s），出现后直接展示
     for (let i = 0; i < 45; i++) {
@@ -438,6 +441,7 @@ async function loadAdvice(adviceId) {
     const advice = await api('coach/read', { recordingId: rid, adviceId });
     currentAdvice = advice;
     const c = advice.content;
+    if (c.speech) $('#speechStream').innerHTML = `<div class="q-card" style="border-color:var(--accent)"><span class="tag">发言（照着念）</span><p style="font-size:15px">${esc(c.speech)}</p></div>`;
     $('#askedOfMe').innerHTML = c.askedOfMe.map(q => `
       <div class="q-card">
         <h4>${esc(q.question)}</h4>
@@ -473,6 +477,7 @@ function renderDebug() {
     </div>
     <div class="card">
       <div class="row" style="justify-content:space-between"><strong>最新建议</strong><span class="muted" id="debugStatus"></span></div>
+      <div id="debugSpeech"></div>
       <div id="debugAdvice"><div class="empty">还没有建议</div></div>
     </div>`;
   bindNav();
@@ -480,6 +485,8 @@ function renderDebug() {
   $('#debugSend').onclick = sendDebugLine;
   $('#debugGen').onclick = async () => {
     if (!debugRid) return toast('先开始调试会议');
+    speechBuffer = '';
+    $('#debugSpeech').innerHTML = '';
     try {
       await api('coach/generate', { recordingId: debugRid });
       watchDebugAdvice();
@@ -530,6 +537,7 @@ async function refreshDebugAdvice() {
     $('#debugStatus').textContent = s.running ? '分析中…' : s.error ? s.error : `已分析 ${s.throughLine} 段`;
     if (s.latestId) {
       const advice = await api('coach/read', { recordingId: debugRid, adviceId: s.latestId });
+      if (advice.content.speech) $('#debugSpeech').innerHTML = `<div class="q-card" style="border-color:var(--accent)"><span class="tag">发言（照着念）</span><p style="font-size:15px">${esc(advice.content.speech)}</p></div>`;
       $('#debugAdvice').innerHTML = advice.content.askedOfMe.map(q => `
         <div class="q-card">
           <h4>${esc(q.question)}</h4>
@@ -623,10 +631,25 @@ window.addEventListener('hashchange', route);
 
 // SSE：实时转写与录音状态
 const events = new EventSource('/events');
+// 流式发言：第一段 speech 逐字到达，立刻显示可跟读的发言
+let speechBuffer = '';
+let speechEl = null;
+events.addEventListener('advice-speech', ev => {
+  const { delta } = JSON.parse(ev.data);
+  if (activeRecordingId || location.hash.includes('debug')) speechBuffer += delta;
+  const box = $('#speechStream') || $('#debugSpeech');
+  if (box) {
+    if (!box.querySelector('.q-card')) box.innerHTML = '<div class="q-card"><p id="speechText"></p></div>';
+    box.querySelector('#speechText').textContent = speechBuffer;
+    box.scrollIntoView({ block: 'nearest' });
+  }
+});
 events.addEventListener('advice-progress', ev => {
-  const { chars } = JSON.parse(ev.data);
+  const { chars, phase } = JSON.parse(ev.data);
   const el = $('#coachStatusText') || $('#debugStatus');
-  if (el && el.textContent.startsWith('分析中')) el.textContent = `正在生成（已写 ${chars} 字）…`;
+  if (!el) return;
+  if (phase === 'thinking') el.textContent = `正在思考（${chars} 字）…`;
+  else if (phase === 'analyzing') el.textContent = `分析中（${chars} 字）…`;
 });
 events.addEventListener('transcript', ev => {
   const { entry } = JSON.parse(ev.data);

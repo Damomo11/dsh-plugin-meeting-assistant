@@ -51,7 +51,7 @@ export async function testModel(cfg, { timeoutMs = 30_000 } = {}) {
   return { text: result.text.slice(0, 80), ttfbMs: result.ttfbMs, totalMs: Date.now() - start, model: result.model };
 }
 
-export async function chatCompletion(cfg, { system, prompt }, { timeoutMs = 90_000, signal, onDelta, wantTtfb } = {}) {
+export async function chatCompletion(cfg, { system, prompt }, { timeoutMs = 90_000, signal, onDelta, onReasoning, wantTtfb } = {}) {
   const { api } = normalizeBaseUrl(cfg.baseUrl);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error('LLM 请求超时')), timeoutMs);
@@ -87,6 +87,7 @@ export async function chatCompletion(cfg, { system, prompt }, { timeoutMs = 90_0
     let buffer = '';
     let text = '';
     let model = cfg.model;
+    let reasoningChars = 0;
     let finish = null;
     while (true) {
       const { done, value } = await reader.read();
@@ -108,6 +109,11 @@ export async function chatCompletion(cfg, { system, prompt }, { timeoutMs = 90_0
           if (ttfbMs === null) ttfbMs = Date.now() - started;
           text += choice.delta.content;
           onDelta?.(choice.delta.content);
+        }
+        // 推理模型的思考流（无正文输出前的等待阶段）只报进度
+        else if (choice?.delta?.reasoning_content) {
+          reasoningChars += choice.delta.reasoning_content.length;
+          onReasoning?.(reasoningChars);
         }
         if (choice?.finish_reason) finish = choice.finish_reason;
       }

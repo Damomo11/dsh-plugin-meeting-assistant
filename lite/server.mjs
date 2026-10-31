@@ -300,13 +300,23 @@ const coach = new MeetingCoach(store, {
   chat: async (input, signal, sessionId, metaId) => {
     const cfg = llmConfig();
     if (!llmConfigValid(cfg)) throw new Error('请先在设置中配置 LLM（Base URL / 模型 / API Key）。');
-    // 生成进度实时推给页面：边生成边看到写了多少字
+    // 生成进度实时推给页面：思考阶段（reasoning）报字数；第一段发言逐字推（立刻可跟读）；
+    // <ANALYSIS_JSON> 之后的部分只报字数不推内容。
     let sent = 0;
+    let inSpeech = true;
     const result = await chatCompletion(cfg, input, {
       signal,
+      onReasoning: chars => {
+        broadcast('advice-progress', { recordingId: metaId, chars, phase: 'thinking' });
+      },
       onDelta: delta => {
-        sent += delta.length;
-        if (metaId) broadcast('advice-progress', { recordingId: metaId, chars: sent });
+        if (inSpeech && delta.includes('<ANALYSIS_JSON>')) inSpeech = false;
+        if (inSpeech) {
+          broadcast('advice-speech', { recordingId: metaId, delta });
+        } else {
+          sent += delta.length;
+          broadcast('advice-progress', { recordingId: metaId, chars: sent, phase: 'analyzing' });
+        }
       },
     });
     return result;
