@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>会议助手 · 轻量版</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #171a23; --panel2: #1e222e; --border: #2a2f3d;
+    --text: #e6e9f0; --muted: #9aa1b2; --accent: #4b6bfb; --accent-soft: #2a3a7e;
+    --ok: #2ea87c; --warn: #d9a441; --err: #e5484d; --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+  .app { max-width: 860px; margin: 0 auto; padding: 16px; }
+  header { display: flex; align-items: center; gap: 12px; padding: 8px 0 14px; }
+  header h1 { font-size: 17px; margin: 0; flex: 1; }
+  header h1 small { color: var(--muted); font-weight: 400; margin-left: 8px; }
+  button { background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 7px 14px; font-size: 13px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { border-color: var(--err); color: var(--err); }
+  input, textarea, select { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font: inherit; width: 100%; }
+  textarea { resize: vertical; min-height: 64px; }
+  label { display: block; color: var(--muted); font-size: 12px; margin: 10px 0 4px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; margin-bottom: 14px; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .tabs { display: flex; gap: 4px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 3px; margin-bottom: 12px; width: fit-content; }
+  .tabs button { border: none; background: transparent; padding: 6px 16px; border-radius: 6px; }
+  .tabs button.active { background: var(--accent-soft); color: #fff; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; background: var(--panel2); border: 1px solid var(--border); color: var(--muted); }
+  .badge.ok { color: var(--ok); border-color: var(--ok); }
+  .badge.err { color: var(--err); border-color: var(--err); }
+  .badge.rec { color: #fff; background: var(--err); border-color: var(--err); animation: pulse 1.6s infinite; }
+  @keyframes pulse { 50% { opacity: .55; } }
+  .muted { color: var(--muted); font-size: 12px; }
+  .rec-head { display: flex; align-items: center; gap: 10px; }
+  .rec-head .time { font-variant-numeric: tabular-nums; font-size: 15px; }
+  .meter { flex: 1; height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; max-width: 220px; }
+  .meter i { display: block; height: 100%; background: var(--ok); width: 0; }
+  .q-card { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
+  .q-card h4 { margin: 0 0 6px; font-size: 14px; }
+  .q-card .why { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+  .reply { border-left: 3px solid var(--accent); padding: 6px 10px; margin: 6px 0; }
+  .reply .tag { font-size: 11px; color: var(--muted); }
+  .reply p { margin: 4px 0; }
+  .sources { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .sources span { border: 1px dashed var(--border); padding: 0 6px; border-radius: 4px; margin-right: 4px; }
+  .t-entry { padding: 4px 0; border-bottom: 1px dashed var(--border); display: flex; gap: 10px; }
+  .t-entry time { color: var(--muted); font-size: 12px; flex: none; padding-top: 2px; }
+  .empty { text-align: center; color: var(--muted); padding: 40px 0; }
+  details { margin: 8px 0; }
+  details summary { cursor: pointer; color: var(--muted); }
+  .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 18px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+  .hist-item { display: flex; gap: 10px; align-items: center; padding: 8px 6px; border-bottom: 1px dashed var(--border); cursor: pointer; border-radius: 6px; }
+  .hist-item:hover { background: var(--panel2); }
+  .hist-item .meta { flex: 1; }
+  .grow { flex: 1; }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 12px; max-width: 620px; width: 92%; padding: 0; }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  dialog .inner { padding: 18px 20px; }
+  dialog h3 { margin: 0 0 8px; }
+  dialog .actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--border); position: sticky; bottom: 0; background: var(--panel); }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>会议助手 <small>轻量版 · 本机运行</small></h1>
+    <span id="llmBadge" class="badge">LLM 未配置</span>
+    <span id="voiceBadge" class="badge">转写未配置</span>
+    <button id="settingsBtn">⚙ 设置</button>
+  </header>
+
+  <!-- 会前准备 -->
+  <section class="card" id="prepareCard">
+    <div class="row" style="justify-content:space-between">
+      <strong>会前准备</strong>
+      <span class="muted">录音前填写；「角色 / 初始观点」就是会中建议的立足点</span>
+    </div>
+    <label>会议邀请（粘贴会邀或主题，可留空）</label>
+    <textarea id="briefInvitation" rows="2" placeholder="例：周四 10:00 项目周会，同步里程碑与风险"></textarea>
+    <label>我的会议目标（希望这场会拿到什么结论）</label>
+    <textarea id="briefGoal" rows="3" placeholder="例：确认二期排期，把测试资源申请下来"></textarea>
+    <div class="row">
+      <button id="polishBtn" disabled>✨ AI 润色目标</button>
+      <span class="muted">生成 2–3 个候选，选中「采用」才会替换</span>
+    </div>
+    <div id="polishArea" style="display:none">
+      <div id="polishCandidates"></div>
+      <div class="row"><button id="polishClose">不用了</button></div>
+    </div>
+    <details>
+      <summary>更多背景（角色与立场 · 初始观点 · 项目目录）</summary>
+      <label>我的角色与权限（我是干什么的、负责什么）</label>
+      <textarea id="briefRole" rows="3" placeholder="例：后端开发，负责交易模块，没有线上发布权限"></textarea>
+      <label>初始观点 / 最近状况</label>
+      <textarea id="briefViews" rows="3" placeholder="例：上周联调完成 80%，卡在前端接口变更；倾向先冻结需求再排期"></textarea>
+      <label>项目目录（建议检索范围，可留空）</label>
+      <input id="briefCwd" placeholder="D:\work\my-project">
+    </details>
+    <div class="row" style="margin-top:12px">
+      <label style="margin:0;display:flex;align-items:center;gap:6px">
+        <input type="checkbox" id="autoAdvice" style="width:auto" checked> 会议中自动生成建议
+      </label>
+      <span class="grow"></span>
+      <button id="saveBriefBtn">保存准备</button>
+      <button id="startBtn" class="primary">🎙 开始录音</button>
+    </div>
+    <p class="muted" id="prepareHint">先保存准备再开始录音；仅填写背景（无转写）时也会生成“预演建议”。</p>
+  </section>
+
+  <!-- 录音中 -->
+  <section class="card" id="recordingCard" style="display:none">
+    <div class="rec-head">
+      <span class="badge rec" id="recState">录音中</span>
+      <span class="time" id="recTime">00:00</span>
+      <div class="meter"><i id="recLevel"></i></div>
+      <span class="grow"></span>
+      <button id="stopBtn" class="danger">■ 结束录音</button>
+    </div>
+    <div class="tabs" id="viewTabs">
+      <button data-view="advice" class="active">回应</button>
+      <button data-view="ask">追问</button>
+      <button data-view="transcript">转写</button>
+    </div>
+
+    <div id="viewAdvice">
+      <div class="row" style="justify-content:space-between;margin-bottom:8px">
+        <span class="muted">可能问到我 · 展开后是可照着说的回答参考</span>
+        <button id="regenBtn">⟳ 立即生成</button>
+      </div>
+      <div id="adviceSummary" class="muted" style="margin-bottom:8px"></div>
+      <div id="askedOfMe"></div>
+    </div>
+
+    <div id="viewAsk" style="display:none">
+      <div class="muted" style="margin-bottom:8px">我可以问的问题 · 目的与时机</div>
+      <div id="askOthers"></div>
+    </div>
+
+    <div id="viewTranscript" style="display:none">
+      <div class="row" style="justify-content:space-between;margin-bottom:8px">
+        <span class="muted">逐句原话（核对转写）</span>
+        <button id="loadEarlier">加载更早内容</button>
+      </div>
+      <div id="transcript"></div>
+    </div>
+
+    <div class="row" style="margin-top:6px">
+      <span class="muted" id="coachStatusText"></span>
+      <span class="grow"></span>
+      <button id="cancelJobBtn" style="display:none">取消本次分析</button>
+    </div>
+  </section>
+
+  <!-- 历史记录 -->
+  <section class="card">
+    <div class="row" style="justify-content:space-between">
+      <strong>历史会议</strong>
+      <button id="refreshHistory">刷新</button>
+    </div>
+    <div id="history"></div>
+  </section>
+
+  <p class="muted">录音、转写与建议都保存在本机 <code id="dataDir"></code>；音频仅发往你配置的百炼转写服务，建议上下文发往你配置的 LLM。</p>
+</div>
+
+<!-- 设置弹窗 -->
+<dialog id="settingsDialog">
+  <div class="inner">
+    <h3>设置</h3>
+    <details open>
+      <summary>转写服务（百炼 / DashScope SASR）</summary>
+      <p class="muted">使用 run-task 流式识别协议；按音频时长计费。留空表示不改。</p>
+      <label>百炼 API Key</label>
+      <input id="cfgApiKey" type="password" placeholder="已保存，留空不修改">
+      <label>流式 WebSocket 地址</label>
+      <input id="cfgWsBase">
+      <label>模型</label>
+      <input id="cfgAsrModel">
+    </details>
+    <details open>
+      <summary>发言建议 LLM（OpenAI 兼容）</summary>
+      <p class="muted">例如 DeepSeek / 通义 / OpenAI 的 /v1 兼容端点。Key 只保存在本机服务端，页面不接触。</p>
+      <label>Base URL（含 /v1）</label>
+      <input id="cfgLlmBase" placeholder="https://api.deepseek.com/v1">
+      <label>模型</label>
+      <input id="cfgLlmModel" placeholder="deepseek-chat">
+      <label>API Key</label>
+      <input id="cfgLlmKey" type="password" placeholder="已保存，留空不修改">
+    </details>
+  </div>
+  <div class="actions">
+    <button onclick="settingsDialog.close()">关闭</button>
+    <button class="primary" id="saveCfgBtn">保存设置</button>
+  </div>
+</dialog>
+
+<dialog id="historyDialog">
+  <div class="inner">
+    <h3 id="historyTitle">会议记录</h3>
+    <div class="tabs" id="histTabs">
+      <button data-hview="advice" class="active">建议</button>
+      <button data-hview="transcript">转写</button>
+    </div>
+    <div id="histBody" style="max-height:60vh;overflow:auto"></div>
+    <div class="row">
+      <button id="exportTxt">导出文字记录</button>
+      <span class="grow"></span>
+      <audio id="histAudio" controls style="display:none;width:100%"></audio>
+    </div>
+  </div>
+  <div class="actions"><button class="primary" onclick="historyDialog.close()">关闭</button></div>
+</dialog>
+
+<div class="toast" id="toast"></div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>
