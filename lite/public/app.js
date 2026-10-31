@@ -392,7 +392,7 @@ async function startRecording() {
     await context.audioWorklet.addModule('/worklet.js');
     const source = context.createMediaStreamSource(stream);
     node = new AudioWorkletNode(context, 'meeting-assistant');
-    const started = await api('start');
+    const started = await api('start', {});
     capture = { stream, context, node, token: started.token, startedAt: Date.now(), sequence: 0 };
     node.port.onmessage = async ev => {
       if (ev.data === 'flushed' || !(ev.data instanceof Uint8Array) || !capture) return;
