@@ -41,6 +41,7 @@ export class MeetingCoach {
     this.totals = new Map();
     this.disposed = false;
     this.suspended = false;
+    this.profile = null; // server 注入：() => ({log}) 最近动态（长期记忆）
   }
   get busy() { return this.jobs.size > 0; }
   key(meta) { return `${meta.sessionId}/${meta.id}`; }
@@ -123,7 +124,7 @@ export class MeetingCoach {
         }
         signal.throwIfAborted();
         if (!owns()) return;
-        const input = buildCoachInput(brief, window.entries, previous, window.omittedLines, project);
+        const input = buildCoachInput(brief, window.entries, previous, window.omittedLines, project, this.profile?.());
         if (hint) input.prompt += `\n【现场提示】${hint}`;
         const generated = await abortable(this.llm.chat(input, signal, sessionId, meta.id), signal);
         signal.throwIfAborted();

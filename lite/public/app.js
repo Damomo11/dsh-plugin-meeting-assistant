@@ -103,18 +103,29 @@ function renderHome() {
 // ===================== 会前准备 =====================
 async function renderPrepare() {
   brief = await api('brief');
+  const profile = await api('profile');
   $('#app').innerHTML = `
     <header style="display:flex;align-items:center;gap:12px;padding:10px 0 18px">
       <button data-go="">←</button><h1 style="font-size:18px;margin:0;flex:1">会前准备</h1>
       <button class="primary" id="saveBriefBtn">保存</button>
     </header>
     <div class="card">
-      <label>会议邀请</label>
-      <textarea id="briefInvitation" rows="2">${esc(brief.invitation)}</textarea>
-      <label>我的目标</label>
-      <textarea id="briefGoal" rows="3">${esc(brief.goal)}</textarea>
+      <label>会议邀请 <span class="muted">· 有会邀或议程就粘过来，临时会议可留空</span></label>
+      <textarea id="briefInvitation" rows="2" placeholder="例：周四 10:00 项目周会，同步里程碑与风险">${esc(brief.invitation)}</textarea>
+      <label>我的目标 <span class="muted">· 这场会我想拿到什么结论</span></label>
+      <textarea id="briefGoal" rows="3" placeholder="例：确认二期排期，把测试资源定下来">${esc(brief.goal)}</textarea>
       <div class="row"><button id="polishBtn" ${status?.llm?.configured ? '' : 'disabled'}>润色</button></div>
       <div id="polishArea"></div>
+    </div>
+    <div class="card">
+      <label>最近动态 <span class="muted">· 最近干了什么、目标、进行中的事——领导突然问就用这份答</span></label>
+      <textarea id="profileLog" rows="5" placeholder="例：上周把交易模块联调推到 80%，卡在前端接口变更；在跟排期；顺手修了两个线上小 bug">${esc(profile.log ?? '')}</textarea>
+      <div class="row" style="margin-top:8px">
+        <button id="saveProfileBtn">保存动态</button>
+        <button id="importProfileBtn">从文件导入</button>
+        <button id="clearProfileBtn" class="danger">清空</button>
+      </div>
+      <p class="muted" style="margin:6px 0 0">这份内容长期保存（本机 profile.json），每场会议都会自动带上，不用每次重填。</p>
     </div>
     <div class="card">
       <label>我的角色</label>
@@ -126,6 +137,29 @@ async function renderPrepare() {
       <label style="display:flex;align-items:center;gap:6px;margin-top:12px"><input type="checkbox" id="autoAdvice" style="width:auto" ${brief.autoEnabled ? 'checked' : ''}>会议中自动生成建议</label>
     </div>`;
   bindNav();
+  $('#saveProfileBtn').onclick = async () => {
+    try {
+      await api('profile', { log: $('#profileLog').value });
+      toast('最近动态已保存，开会时自动带上');
+    } catch (e) { toast(e.message); }
+  };
+  $('#importProfileBtn').onclick = async () => {
+    const file = prompt('填一个本地文本文件路径（txt/md/log，比如周报、笔记导出）', '');
+    if (!file) return;
+    try {
+      await api('profile/import', { file });
+      await renderPrepare();
+      toast('已导入，追加到最近动态末尾');
+    } catch (e) { toast(e.message); }
+  };
+  $('#clearProfileBtn').onclick = async () => {
+    if (!confirm('清空最近动态？')) return;
+    try {
+      await api('profile', { log: '' });
+      await renderPrepare();
+      toast('已清空');
+    } catch (e) { toast(e.message); }
+  };
   $('#saveBriefBtn').onclick = async () => {
     try {
       brief = await api('brief', {

@@ -78,6 +78,38 @@ function publicLlmConfig() {
   return { baseUrl: c.baseUrl, model: c.model, effort: c.effort ?? 'low', configured: llmConfigValid(c), profiles, activeProfile: findActiveProfile(c, profiles) };
 }
 
+// ---- 个人最近动态（长期记忆）：领导突然问"最近干了什么/目标是什么"时的素材，
+//      每场会议自动作为发言立足点带上。存 ROOT/profile.json，会前准备页可编辑/导入文件。
+function profilePath() { return join(ROOT, 'profile.json'); }
+function readProfile() {
+  try { return JSON.parse(readFileSync(profilePath(), 'utf8')); } catch { return { log: '' }; }
+}
+function writeProfile(draft) {
+  const previous = readProfile();
+  const log = typeof draft.log === 'string' ? draft.log.slice(0, 16000) : previous.log;
+  const next = { log };
+  const tmp = join(ROOT, `profile.json.${randomUUID()}.tmp`);
+  writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 });
+  renameSync(tmp, profilePath());
+  chmodSync(profilePath(), 0o600);
+  return next;
+}
+// 导入本地文件（txt/md/log 文本）进最近动态
+async function importProfileFile(file) {
+  if (typeof file !== 'string' || !file.trim()) throw new Error('请提供文件路径。');
+  let raw;
+  try { raw = readFileSync(file.trim(), 'utf8'); } catch { throw new Error(`读不了这个文件：${file}（请填本机绝对路径）`); }
+  if (!raw.trim()) throw new Error('文件是空的。');
+  if (raw.includes('\u0000')) throw new Error('这个文件是二进制，不是文本。');
+  const previous = readProfile();
+  const next = { log: (previous.log ? previous.log + '\n\n' : '') + raw.slice(0, 16000) };
+  const tmp = join(ROOT, `profile.json.${randomUUID()}.tmp`);
+  writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 });
+  renameSync(tmp, profilePath());
+  chmodSync(profilePath(), 0o600);
+  return next;
+}
+
 // ---- 多厂商预设：profiles.json 存多家 {name, baseUrl, model, apiKey}，一键切换即写回 llm.json ----
 function profilesPath() { return join(ROOT, 'llm-profiles.json'); }
 function readLlmProfiles() {
@@ -327,6 +359,7 @@ const coach = new MeetingCoach(store, {
   },
 });
 coach.briefs = briefs;
+coach.profile = readProfile;
 
 function statusPayload() {
   const recordings = store.list(SESSION_ID, 30).map(meta => {
@@ -459,6 +492,10 @@ async function route(req, res, pathname) {
     const saved = await briefs.save(SESSION_ID, body.cwd ?? '', body.brief ?? body, body.recordingId);
     return json(res, 200, briefs.public(saved));
   }
+  // 个人最近动态（长期记忆）：读 / 存 / 从文件导入
+  if (api === 'profile' && req.method === 'GET') return json(res, 200, readProfile());
+  if (api === 'profile' && req.method === 'POST') return json(res, 200, writeProfile(body));
+  if (api === 'profile/import' && req.method === 'POST') return json(res, 200, await importProfileFile(body.file));
   if (api === 'brief/polish' && req.method === 'POST') {
     const cfg = llmConfig();
     if (!llmConfigValid(cfg)) throw new Error('请先在设置中配置 LLM。');
