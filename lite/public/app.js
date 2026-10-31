@@ -39,6 +39,7 @@ let brief = { invitation: '', goal: '', role: '', initialViews: '', cwd: '', aut
 
 async function refreshStatus() {
   status = await api('status');
+  checkServerVersion(status);
   return status;
 }
 
@@ -481,7 +482,7 @@ function renderDebug() {
     if (!debugRid) return toast('先开始调试会议');
     try {
       await api('coach/generate', { recordingId: debugRid });
-      setTimeout(refreshDebugAdvice, 2000);
+      watchDebugAdvice();
     } catch (e) { toast(e.message); }
   };
 }
@@ -505,8 +506,22 @@ async function sendDebugLine() {
     await api('debug/say', { recordingId: debugRid, text });
     // 转写行由 SSE 推送渲染，这里只清输入
     $('#debugInput').value = '';
-    setTimeout(refreshDebugAdvice, 2500);
+    watchDebugAdvice();
   } catch (e) { toast(e.message); }
+}
+let debugWatchId = null;
+function watchDebugAdvice() {
+  if (!debugRid) return;
+  if (debugWatchId) clearInterval(debugWatchId);
+  debugWatchId = setInterval(async () => {
+    if (!debugRid || !$('#debugStatus')) { clearInterval(debugWatchId); debugWatchId = null; return; }
+    const s = await api(`coach/state?recordingId=${encodeURIComponent(debugRid)}`, undefined, 'GET').catch(() => null);
+    if (!s) return;
+    if (s.running) { $('#debugStatus').textContent = '分析中…'; return; }
+    // 结束（成功或失败）就停轮询并渲染
+    clearInterval(debugWatchId); debugWatchId = null;
+    refreshDebugAdvice();
+  }, 2500);
 }
 async function refreshDebugAdvice() {
   if (!debugRid) return;
@@ -574,6 +589,19 @@ async function openHistory(recordingId) {
     URL.revokeObjectURL(a.href);
   };
   dlg.onclose = () => dlg.remove();
+}
+
+// 版本指纹：记录页面加载时的 server 启动时间；不一致说明页面比 server 旧（git pull 后没刷新）
+// 或 server 比页面新（git pull 后没强刷页面），SSE 端点可能不匹配，给用户提示。
+let pageLoadedAtServer = null;
+function checkServerVersion(status) {
+  if (typeof status?.serverStartedAt !== 'number') return;
+  if (pageLoadedAtServer === null) { pageLoadedAtServer = status.serverStartedAt; return; }
+  if (status.serverStartedAt !== pageLoadedAtServer) {
+    pageLoadedAtServer = status.serverStartedAt;
+    toast('检测到服务端已重启，正在刷新页面…');
+    setTimeout(() => location.reload(), 800);
+  }
 }
 
 // ===================== 路由 =====================

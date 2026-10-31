@@ -28,6 +28,9 @@ const PORT = Number(process.env.MEETING_PORT ?? 8787);
 const HOST = process.env.MEETING_HOST ?? '127.0.0.1';
 const ROOT = voiceHome(); // ~/.agent-mesh/voice（MESH_VOICE_HOME 可覆盖）
 export const SESSION_ID = 'lite'; // 单机单用户：一个固定会话名，录音目录沿用原插件布局
+// 版本指纹：页面与 server 各自上报，不一致 = git pull 后只刷新了一边，提示重启/强刷。
+// 用 server 启动时刻：server 重启必变；页面刷新后与当前一致即可比对。
+export const SERVER_STARTED_AT = Date.now();
 
 mkdirSync(ROOT, { recursive: true, mode: 0o700 });
 const store = new MeetingStore(ROOT);
@@ -395,7 +398,7 @@ async function route(req, res, pathname) {
   const api = pathname.slice('/api/'.length);
   const body = ['GET', 'HEAD'].includes(req.method) ? {} : JSON.parse((await readBody(req)).toString('utf8') || '{}');
 
-  if (api === 'status' && req.method === 'GET') return json(res, 200, statusPayload());
+  if (api === 'status' && req.method === 'GET') return json(res, 200, { ...statusPayload(), serverStartedAt: SERVER_STARTED_AT });
 
   if (api === 'voice-config' && req.method === 'GET') {
     const c = readConfig(ROOT);
