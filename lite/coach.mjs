@@ -124,7 +124,8 @@ export class MeetingCoach {
         }
         signal.throwIfAborted();
         if (!owns()) return;
-        const input = buildCoachInput(brief, window.entries, previous, window.omittedLines, project, this.profile?.());
+        const notes = this.notes ? this.notes(meta.id) : [];
+        const input = buildCoachInput(brief, window.entries, previous, window.omittedLines, project, this.profile?.(), notes);
         if (hint) input.prompt += `\n【现场提示】${hint}`;
         const generated = await abortable(this.llm.chat(input, signal, sessionId, meta.id), signal);
         signal.throwIfAborted();

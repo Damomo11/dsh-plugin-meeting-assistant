@@ -8,7 +8,7 @@
 // LLM 的 baseUrl/model 存在服务端配置里，apiKey 由服务端持有，页面不接触密钥。
 
 import http from 'node:http';
-import { readFileSync, existsSync, mkdirSync, writeFileSync, renameSync, chmodSync, statSync, createReadStream, rmSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, writeFileSync, renameSync, chmodSync, statSync, createReadStream, rmSync, appendFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname, extname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -360,6 +360,15 @@ const coach = new MeetingCoach(store, {
 });
 coach.briefs = briefs;
 coach.profile = readProfile;
+// 会中备注读取器：coach 生成时把这场会议的现场补充并入证据链
+coach.notes = (recordingId) => {
+  const meta = store.get(SESSION_ID, recordingId);
+  const file = join(store.dir(SESSION_ID, meta.id), 'notes.jsonl');
+  try {
+    return readFileSync(file, 'utf8').split('\n').filter(Boolean)
+      .map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  } catch { return []; }
+};
 
 function statusPayload() {
   const recordings = store.list(SESSION_ID, 30).map(meta => {
@@ -562,6 +571,25 @@ async function route(req, res, pathname) {
     entry.text = text;
     writeFileSync(file, entries.map(e => JSON.stringify(e)).join('\n') + '\n', { mode: 0o600 });
     return json(res, 200, { line: entry.line, text: entry.text });
+  }
+  // 会中备注：本人随时补充的现场说明（"刚才是领导打电话说的，忽略""这段是给我们说的"）。
+  // 存 notes.jsonl，建议生成时并入证据链，用户可指示忽略或着重某段转写。
+  if (api === 'note' && req.method === 'POST') {
+    const meta = store.get(SESSION_ID, body.recordingId);
+    const text = String(body.text ?? '').trim();
+    if (!text || text.length > 1000) throw new Error('备注为空或过长。');
+    const file = join(store.dir(SESSION_ID, meta.id), 'notes.jsonl');
+    appendFileSync(file, JSON.stringify({ ts: Date.now(), text }) + '\n', { mode: 0o600 });
+    return json(res, 200, { saved: true });
+  }
+  if (api === 'note' && req.method === 'GET') {
+    const meta = store.get(SESSION_ID, body.recordingId ?? undefined);
+    const file = join(store.dir(SESSION_ID, meta.id), 'notes.jsonl');
+    let notes = [];
+    try {
+      notes = readFileSync(file, 'utf8').split('\n').filter(Boolean).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    } catch { /* 还没有备注 */ }
+    return json(res, 200, { notes });
   }
   if (api === 'coach/generate' && req.method === 'POST') {
     if (!active && !store.get(SESSION_ID, body.recordingId)) throw new Error('无此录音');

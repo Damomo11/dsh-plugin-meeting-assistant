@@ -110,33 +110,47 @@ async function renderPrepare() {
       <button class="primary" id="saveBriefBtn">保存</button>
     </header>
     <div class="card">
-      <label>会议邀请 <span class="muted">· 有会邀或议程就粘过来，临时会议可留空</span></label>
-      <textarea id="briefInvitation" rows="2" placeholder="例：周四 10:00 项目周会，同步里程碑与风险">${esc(brief.invitation)}</textarea>
-      <label>我的目标 <span class="muted">· 这场会我想拿到什么结论</span></label>
-      <textarea id="briefGoal" rows="3" placeholder="例：确认二期排期，把测试资源定下来">${esc(brief.goal)}</textarea>
+      <label>我的目标</label>
+      <textarea id="briefGoal" rows="2" placeholder="这场会想拿到什么，如：确认二期排期">${esc(brief.goal)}</textarea>
       <div class="row"><button id="polishBtn" ${status?.llm?.configured ? '' : 'disabled'}>润色</button></div>
       <div id="polishArea"></div>
+      <label>会议邀请</label>
+      <textarea id="briefInvitation" rows="2" placeholder="有会邀就粘过来，临时会议留空">${esc(brief.invitation)}</textarea>
     </div>
     <div class="card">
-      <label>最近动态 <span class="muted">· 最近干了什么、目标、进行中的事——领导突然问就用这份答</span></label>
-      <textarea id="profileLog" rows="5" placeholder="例：上周把交易模块联调推到 80%，卡在前端接口变更；在跟排期；顺手修了两个线上小 bug">${esc(profile.log ?? '')}</textarea>
+      <label>最近动态 <span class="muted">· 领导突然问"最近干了什么"就用这份答，长期保存</span></label>
+      <textarea id="profileLog" rows="4" placeholder="例：上周把交易模块联调推到 80%，卡在前端接口变更；在跟排期">${esc(profile.log ?? '')}</textarea>
       <div class="row" style="margin-top:8px">
-        <button id="saveProfileBtn">保存动态</button>
-        <button id="importProfileBtn">从文件导入</button>
+        <button id="saveProfileBtn">保存</button>
+        <button id="importProfileBtn">导入文件</button>
         <button id="clearProfileBtn" class="danger">清空</button>
       </div>
-      <p class="muted" style="margin:6px 0 0">这份内容长期保存（本机 profile.json），每场会议都会自动带上，不用每次重填。</p>
     </div>
     <div class="card">
       <label>我的角色</label>
-      <textarea id="briefRole" rows="3">${esc(brief.role)}</textarea>
+      <textarea id="briefRole" rows="2" placeholder="例：后端开发，负责交易模块">${esc(brief.role)}</textarea>
       <label>初始观点</label>
-      <textarea id="briefViews" rows="3">${esc(brief.initialViews)}</textarea>
+      <textarea id="briefViews" rows="2" placeholder="例：倾向先冻结需求再排期">${esc(brief.initialViews)}</textarea>
       <label>项目目录</label>
-      <input id="briefCwd" value="${esc(brief.cwd)}">
+      <input id="briefCwd" placeholder="选填，让建议能引用你的项目文件" value="${esc(brief.cwd)}">
       <label style="display:flex;align-items:center;gap:6px;margin-top:12px"><input type="checkbox" id="autoAdvice" style="width:auto" ${brief.autoEnabled ? 'checked' : ''}>会议中自动生成建议</label>
     </div>`;
   bindNav();
+  $('#saveBriefBtn').onclick = async () => {
+    try {
+      brief = await api('brief', {
+        invitation: $('#briefInvitation').value.trim(),
+        goal: $('#briefGoal').value.trim(),
+        role: $('#briefRole').value.trim(),
+        initialViews: $('#briefViews').value.trim(),
+        cwd: $('#briefCwd').value.trim(),
+        autoEnabled: $('#autoAdvice').checked,
+      });
+      await api('profile', { log: $('#profileLog').value }).catch(() => { });
+      toast('已保存');
+      location.hash = '#/';
+    } catch (e) { toast(e.message); }
+  };
   $('#saveProfileBtn').onclick = async () => {
     try {
       await api('profile', { log: $('#profileLog').value });
@@ -158,19 +172,6 @@ async function renderPrepare() {
       await api('profile', { log: '' });
       await renderPrepare();
       toast('已清空');
-    } catch (e) { toast(e.message); }
-  };
-  $('#saveBriefBtn').onclick = async () => {
-    try {
-      brief = await api('brief', {
-        invitation: $('#briefInvitation').value.trim(),
-        goal: $('#briefGoal').value.trim(),
-        role: $('#briefRole').value.trim(),
-        initialViews: $('#briefViews').value.trim(),
-        cwd: $('#briefCwd').value.trim(),
-        autoEnabled: $('#autoAdvice').checked,
-      });
-      toast('已保存');
     } catch (e) { toast(e.message); }
   };
   $('#polishBtn').onclick = async () => {
@@ -427,8 +428,26 @@ function renderLive() {
       <div id="askedOfMe"><div class="empty">暂无建议</div></div>
     </div>
     <div id="viewAsk" style="display:none"><div id="askOthers"><div class="empty">暂无</div></div></div>
-    <div id="viewTranscript" style="display:none"><div id="transcript"><div class="empty">等待说话</div></div></div>`;
+    <div id="viewTranscript" style="display:none">
+      <div class="row" style="margin-bottom:8px">
+        <input id="noteInput" placeholder="补充现场说明：刚才是电话忽略它 / 这段才是重点…" style="flex:1">
+        <button id="noteBtn">记下</button>
+      </div>
+      <div id="transcript"><div class="empty">等待说话</div></div>
+    </div>`;
   $('#stopBtn').onclick = stopRecording;
+  $('#noteBtn').onclick = async () => {
+    const text = $('#noteInput').value.trim();
+    if (!text) return;
+    try {
+      await api('note', { recordingId: rid, text });
+      $('#noteInput').value = '';
+      toast('已记下，下轮建议会照它调整');
+    } catch (e) { toast(e.message); }
+  };
+  $('#noteInput').addEventListener('keydown', async ev => {
+    if (ev.key === 'Enter') { ev.preventDefault(); $('#noteBtn').click(); }
+  });
   // 轮到我了：即使没有新转写也强制生成一段"现在就发言"的稿子（领导眼神示意时用）
   $('#myTurnBtn').onclick = async () => {
     const btn = $('#myTurnBtn');
