@@ -73,12 +73,23 @@ function renderHome() {
   $('#refreshBtn').onclick = async () => { await refreshStatus(); renderHome(); };
   const history = status?.recordings ?? [];
   $('#history').innerHTML = history.length ? history.map(r => `
-    <div class="hist-item" data-open="${r.id}">
+    <div class="hist-item">
       <span class="badge">${r.state === 'stopped' ? '结束' : r.state === 'interrupted' ? '中断' : '进行中'}</span>
-      <div class="grow"><div>${fmtDate(r.startedAt)}</div><div class="muted">${r.segments} 段</div></div>
-      <button>回看</button>
+      <div class="grow" data-open="${r.id}" style="cursor:pointer"><div>${fmtDate(r.startedAt)}</div><div class="muted">${r.segments} 段</div></div>
+      <button data-open2="${r.id}">回看</button>
+      <button data-del="${r.id}" class="danger">删</button>
     </div>`).join('') : '<div class="empty">还没有会议记录</div>';
-  $('#history').querySelectorAll('[data-open]').forEach(el => el.onclick = () => openHistory(el.dataset.open));
+  $('#history').querySelectorAll('[data-open],[data-open2]').forEach(el => el.onclick = e => { e.stopPropagation(); openHistory(el.dataset.open || el.dataset.open2); });
+  $('#history').querySelectorAll('[data-del]').forEach(el => el.onclick = async e => {
+    e.stopPropagation();
+    if (!confirm('删除这场会议记录？（转写、建议、音频一起删，不可恢复）')) return;
+    try {
+      await api('delete', { recordingId: el.dataset.del });
+      await refreshStatus();
+      renderHome();
+      toast('已删除');
+    } catch (err) { toast(err.message); }
+  });
   const startBtn = $('#startBtn');
   if (startBtn) startBtn.onclick = startRecording;
   if (rec) {
@@ -340,14 +351,18 @@ async function startRecording() {
 async function stopRecording() {
   const c = capture;
   capture = null;
+  const btn = $('#stopBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '结束中…'; }
   if (c?.node) { try { c.node.port.postMessage('flush'); } catch { } }
-  try { if (c?.token) await api('stop', { token: c.token }); } catch { }
+  // 停麦克风立刻做；server 收尾不等（ASR finish 最长 12s，不阻塞界面）
   setTimeout(() => {
     try { c?.node?.disconnect(); } catch { }
     c?.stream?.getTracks().forEach(t => t.stop());
     c?.context?.close?.().catch?.(() => { });
-  }, 400);
+  }, 300);
   if (pollTimer) clearInterval(pollTimer), pollTimer = null;
+  api('stop', { token: c?.token }).catch(() => { });
+  // 界面立刻回首页，server 在后台收尾
   await refreshStatus();
   renderHome();
 }
@@ -355,11 +370,12 @@ async function stopRecording() {
 function renderLive() {
   const rid = activeRecordingId;
   $('#app').innerHTML = `
-    <header style="display:flex;align-items:center;gap:12px;padding:10px 0 18px">
+    <header class="rec-head" style="padding:10px 4px 16px">
+      <span class="pulse-dot"></span>
       <span class="badge rec" id="recState">录音中</span>
-      <span id="recTime" class="muted" style="font-size:16px"></span>
+      <span id="recTime" class="time" style="font-weight:700"></span>
       <span class="grow"></span>
-      <button id="stopBtn" style="border-color:var(--err);color:var(--err)">结束</button>
+      <button class="danger" id="stopBtn">结束</button>
     </header>
     <div class="tabs" id="viewTabs">
       <button data-view="advice" class="active">回应</button>
@@ -370,6 +386,7 @@ function renderLive() {
       <div class="row" style="justify-content:space-between;margin-bottom:8px">
         <span class="muted" id="coachStatusText">等待建议</span>
         <span class="grow"></span>
+        <button id="myTurnBtn" class="primary">轮到我了</button>
         <button id="regenBtn">生成</button>
       </div>
       <div id="speechStream"></div>
@@ -378,6 +395,24 @@ function renderLive() {
     <div id="viewAsk" style="display:none"><div id="askOthers"><div class="empty">暂无</div></div></div>
     <div id="viewTranscript" style="display:none"><div id="transcript"><div class="empty">等待说话</div></div></div>`;
   $('#stopBtn').onclick = stopRecording;
+  // 轮到我了：即使没有新转写也强制生成一段"现在就发言"的稿子（领导眼神示意时用）
+  $('#myTurnBtn').onclick = async () => {
+    const btn = $('#myTurnBtn');
+    btn.disabled = true; btn.textContent = '写稿中…';
+    speechBuffer = '';
+    $('#speechStream').innerHTML = '';
+    try { await api('coach/generate', { recordingId: rid, hint: '现在轮到用户发言了，请直接给出能立刻照念的发言稿' }); }
+    catch (e) { toast(e.message); btn.disabled = false; btn.textContent = '轮到我了'; return; }
+    for (let i = 0; i < 45; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      let s;
+      try { s = await api(`coach/state?recordingId=${encodeURIComponent(rid)}`, undefined, 'GET'); }
+      catch { continue; }
+      if (s.latestId) { await loadAdvice(s.latestId); break; }
+      if (s.error && !s.running) break;
+    }
+    btn.disabled = false; btn.textContent = '轮到我了';
+  };
   $('#regenBtn').onclick = async () => {
     const btn = $('#regenBtn');
     btn.disabled = true; btn.textContent = '分析中…';
@@ -418,7 +453,20 @@ function appendTranscript(entry) {
   if (box.querySelector('.empty')) box.innerHTML = '';
   const div = document.createElement('div');
   div.className = 't-entry';
-  div.innerHTML = `<time>${fmtClock(entry.ts)}</time><span>${esc(entry.text)}</span>`;
+  // 点文字可改（ASR 错字导致意思变了时人工修正，改完可重新生成建议）
+  div.innerHTML = `<time>${fmtClock(entry.ts)}</time><span data-line="${entry.line}" style="cursor:text" title="点击修改这段转写">${esc(entry.text)}</span>`;
+  div.querySelector('[data-line]').onclick = async el => {
+    const span = el.target ?? el;
+    const line = Number(span.dataset.line);
+    const current = span.textContent;
+    const text = prompt('修正这段转写（改完在"回应"页点"生成"重新出建议）', current);
+    if (!text || text === current) return;
+    try {
+      await api('transcript/edit', { recordingId: activeRecordingId, line, text });
+      span.textContent = text;
+      toast('已修正');
+    } catch (e) { toast(e.message); }
+  };
   box.appendChild(div);
   while (box.children.length > 400) box.firstChild.remove();
 }
@@ -641,6 +689,13 @@ window.addEventListener('hashchange', route);
 
 // SSE：实时转写与录音状态
 const events = new EventSource('/events');
+events.addEventListener('recording-state', ev => {
+  const { state } = JSON.parse(ev.data);
+  // server 侧已停（自动停/收尾）而页面还在录音视图 → 自动退回首页
+  if (['stopped', 'interrupted', 'error'].includes(state) && capture === null && (location.hash === '' || location.hash === '#/' || location.hash === '#')) {
+    renderHome();
+  }
+});
 // 流式发言：第一段 speech 逐字到达，立刻显示可跟读的发言
 let speechBuffer = '';
 let speechEl = null;

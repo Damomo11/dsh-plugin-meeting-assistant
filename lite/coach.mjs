@@ -82,7 +82,7 @@ export class MeetingCoach {
     if (!/^[0-9a-f-]{36}$/.test(id)) throw new Error('无效的建议记录。');
     return JSON.parse(readFileSync(join(this.store.dir(sessionId, recordingId), 'advice', id + '.json'), 'utf8'));
   }
-  request(sessionId, recordingId, reason = 'manual') {
+  request(sessionId, recordingId, reason = 'manual', hint = '') {
     if (this.disposed) throw new Error('会议建议服务已关闭');
     if (this.suspended) throw new Error('会议分析正在重新连接，请稍后重试。');
     const meta = { ...this.store.get(sessionId, recordingId) }, key = this.key(meta), existing = this.jobs.get(key);
@@ -124,6 +124,7 @@ export class MeetingCoach {
         signal.throwIfAborted();
         if (!owns()) return;
         const input = buildCoachInput(brief, window.entries, previous, window.omittedLines, project);
+        if (hint) input.prompt += `\n【现场提示】${hint}`;
         const generated = await abortable(this.llm.chat(input, signal, sessionId, meta.id), signal);
         signal.throwIfAborted();
         if (!owns()) return;

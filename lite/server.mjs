@@ -8,7 +8,7 @@
 // LLM 的 baseUrl/model 存在服务端配置里，apiKey 由服务端持有，页面不接触密钥。
 
 import http from 'node:http';
-import { readFileSync, existsSync, mkdirSync, writeFileSync, renameSync, chmodSync, statSync, createReadStream } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, writeFileSync, renameSync, chmodSync, statSync, createReadStream, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname, extname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -499,14 +499,37 @@ async function route(req, res, pathname) {
   if (api === 'audio' && req.method === 'POST') return json(res, 200, acceptAudio(body.token, body.sequence, body.pcm));
   if (api === 'stop' && req.method === 'POST') return json(res, 200, await stopRecording(body.token));
   if (api === 'select' && req.method === 'POST') { store.select(SESSION_ID, body.recordingId); return json(res, 200, { selected: true }); }
+  if (api === 'delete' && req.method === 'POST') {
+    if (active && active.meta.id === body.recordingId) throw new Error('录音进行中，请先结束再删除。');
+    const meta = store.get(SESSION_ID, body.recordingId);
+    const dir = store.dir(SESSION_ID, meta.id);
+    rmSync(dir, { recursive: true, force: true });
+    return json(res, 200, { deleted: true });
+  }
 
   if (api === 'read' && req.method === 'POST') {
     const result = await store.read(SESSION_ID, body);
     return json(res, 200, result);
   }
+  // 转写人工修正：改单条文本（ASR 错字/漏字导致意思变了），改完前端可重新生成建议
+  if (api === 'transcript/edit' && req.method === 'POST') {
+    const meta = store.get(SESSION_ID, body.recordingId);
+    const file = join(store.dir(SESSION_ID, meta.id), 'transcript.jsonl');
+    if (!existsSync(file)) throw new Error('这场会议没有转写记录。');
+    const lines = readFileSync(file, 'utf8').split('\n').filter(Boolean);
+    const entries = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    const entry = entries.find(e => e.line === Number(body.line));
+    if (!entry) throw new Error('没有这一条转写。');
+    const text = String(body.text ?? '').trim();
+    if (!text || text.length > 2000) throw new Error('内容为空或过长。');
+    entry.text = text;
+    writeFileSync(file, entries.map(e => JSON.stringify(e)).join('\n') + '\n', { mode: 0o600 });
+    return json(res, 200, { line: entry.line, text: entry.text });
+  }
   if (api === 'coach/generate' && req.method === 'POST') {
     if (!active && !store.get(SESSION_ID, body.recordingId)) throw new Error('无此录音');
-    return json(res, 200, coach.request(SESSION_ID, body.recordingId, 'manual'));
+    const hint = typeof body.hint === 'string' ? body.hint.slice(0, 300) : '';
+    return json(res, 200, coach.request(SESSION_ID, body.recordingId, 'manual', hint));
   }
   if (api === 'coach/cancel' && req.method === 'POST') return json(res, 200, coach.cancel(SESSION_ID, body.recordingId, body.jobId));
   if (api === 'coach/auto' && req.method === 'POST') return json(res, 200, briefs.setAutomatic(SESSION_ID, body.recordingId, body.enabled));

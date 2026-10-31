@@ -2,58 +2,217 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>会议助手</title>
 <style>
+  /* iOS 26 Liquid Glass 风：悬浮玻璃卡片 + 柔和渐变背景 + 大圆角 + 轻模糊 */
   :root {
-    --bg: #0f1117; --panel: #171a23; --panel2: #1e222e; --border: #2a2f3d;
-    --text: #e6e9f0; --muted: #9aa1b2; --accent: #4b6bfb;
-    --ok: #2ea87c; --warn: #d9a441; --err: #e5484d; --radius: 10px;
+    --bg: linear-gradient(160deg, #c7d5f5 0%, #e6d9f3 38%, #f6d9e6 72%, #f8e8d8 100%);
+    --glass: rgba(255, 255, 255, 0.55);
+    --glass-strong: rgba(255, 255, 255, 0.72);
+    --glass-border: rgba(255, 255, 255, 0.85);
+    --text: #1c2030;
+    --text-soft: #5a5f74;
+    --accent: #2563eb;
+    --accent-glass: rgba(37, 99, 235, 0.82);
+    --ok: #0e9f6e;
+    --err: #e5484d;
+    --radius: 26px;
+    --shadow: 0 8px 32px rgba(70, 80, 120, 0.16), inset 0 1px 0 rgba(255,255,255,0.9);
   }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
-  .app { max-width: 860px; margin: 0 auto; padding: 16px; }
-  a { color: var(--accent); text-decoration: none; }
-  button { background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 7px 14px; font-size: 13px; cursor: pointer; }
-  button:hover { border-color: var(--accent); }
-  button:disabled { opacity: .45; cursor: not-allowed; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button.big { padding: 16px 24px; font-size: 18px; border-radius: 12px; width: 100%; }
-  input, textarea { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font: inherit; width: 100%; }
-  textarea { resize: vertical; min-height: 60px; }
-  label { display: block; color: var(--muted); font-size: 12px; margin: 10px 0 4px; }
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; margin-bottom: 14px; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    background-attachment: fixed;
+    color: var(--text);
+    font: 15px/1.65 -apple-system, "SF Pro Display", "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    overflow-x: hidden;
+  }
+  /* 背景光斑（液体感） */
+  .blobs { position: fixed; inset: 0; z-index: -1; overflow: hidden; }
+  .blob { position: absolute; border-radius: 50%; filter: blur(60px); opacity: 0.5; animation: drift 26s ease-in-out infinite alternate; }
+  .blob:nth-child(1) { width: 46vmax; height: 46vmax; left: -12vmax; top: -18vmax; background: #9fc0ff; }
+  .blob:nth-child(2) { width: 40vmax; height: 40vmax; right: -10vmax; top: 8vmax; background: #ffcaf0; animation-delay: -8s; }
+  .blob:nth-child(3) { width: 36vmax; height: 36vmax; left: 22vmax; bottom: -16vmax; background: #ffe3a3; animation-delay: -16s; }
+  @keyframes drift { from { transform: translate3d(0,0,0) scale(1); } to { transform: translate3d(6vmax, 4vmax, 0) scale(1.15); } }
+
+  .app { max-width: 720px; margin: 0 auto; padding: 14px 16px calc(28px + env(safe-area-inset-bottom)); }
+  header { display: flex; align-items: center; gap: 10px; padding: 6px 4px 14px; }
+  header h1 { font-size: 21px; font-weight: 700; margin: 0; flex: 1; letter-spacing: 0.2px; }
+
+  .card {
+    background: var(--glass);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius);
+    padding: 18px;
+    margin-bottom: 14px;
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(22px) saturate(1.5);
+    -webkit-backdrop-filter: blur(22px) saturate(1.5);
+  }
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  .tabs { display: flex; gap: 4px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 3px; margin-bottom: 12px; width: fit-content; }
-  .tabs button { border: none; background: transparent; padding: 6px 16px; border-radius: 6px; }
-  .tabs button.active { background: var(--accent); color: #fff; }
-  .badge { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; background: var(--panel2); border: 1px solid var(--border); color: var(--muted); }
-  .badge.ok { color: var(--ok); border-color: var(--ok); }
-  .badge.err { color: var(--err); border-color: var(--err); }
-  .badge.rec { color: #fff; background: var(--err); border-color: var(--err); animation: pulse 1.6s infinite; }
-  @keyframes pulse { 50% { opacity: .55; } }
-  .muted { color: var(--muted); font-size: 12px; }
-  .q-card { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
-  .q-card h4 { margin: 0 0 6px; font-size: 14px; }
-  .reply { border-left: 3px solid var(--accent); padding: 6px 10px; margin: 6px 0; }
-  .reply .tag { font-size: 11px; color: var(--muted); }
-  .reply p { margin: 4px 0; }
-  .t-entry { padding: 4px 0; border-bottom: 1px dashed var(--border); display: flex; gap: 10px; }
-  .t-entry time { color: var(--muted); font-size: 12px; flex: none; padding-top: 2px; }
-  .empty { text-align: center; color: var(--muted); padding: 40px 0; }
-  .hist-item { display: flex; gap: 10px; align-items: center; padding: 8px 6px; border-bottom: 1px dashed var(--border); cursor: pointer; border-radius: 6px; }
-  .hist-item:hover { background: var(--panel2); }
   .grow { flex: 1; }
-  .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 18px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 10; }
-  .toast.show { opacity: 1; }
-  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 12px; max-width: 640px; width: 92%; padding: 0; }
-  dialog::backdrop { background: rgba(0,0,0,.6); }
-  dialog .inner { padding: 18px 20px; }
-  dialog h3 { margin: 0 0 8px; }
-  dialog .actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--border); }
+
+  button {
+    background: var(--glass-strong);
+    color: var(--text);
+    border: 1px solid var(--glass-border);
+    border-radius: 16px;
+    padding: 9px 18px;
+    font-size: 15px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: transform 0.12s ease, box-shadow 0.12s ease, opacity 0.12s;
+    box-shadow: 0 2px 10px rgba(70, 80, 120, 0.10), inset 0 1px 0 rgba(255,255,255,0.9);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+  }
+  button:hover { box-shadow: 0 4px 18px rgba(70, 80, 120, 0.18), inset 0 1px 0 rgba(255,255,255,0.95); }
+  button:active { transform: scale(0.96); opacity: 0.9; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+  button.primary {
+    background: var(--accent-glass);
+    border-color: rgba(255,255,255,0.5);
+    color: #fff;
+    box-shadow: 0 6px 22px rgba(37, 99, 235, 0.35), inset 0 1px 0 rgba(255,255,255,0.45);
+  }
+  button.big {
+    width: 100%;
+    padding: 18px 24px;
+    font-size: 20px;
+    border-radius: 24px;
+    background: var(--accent-glass);
+    color: #fff;
+    box-shadow: 0 10px 30px rgba(37, 99, 235, 0.35), inset 0 1px 0 rgba(255,255,255,0.5);
+  }
+  button.danger { color: var(--err); border-color: rgba(229, 72, 77, 0.45); background: rgba(255, 235, 235, 0.6); }
+
+  input, textarea, select {
+    background: rgba(255, 255, 255, 0.65);
+    color: var(--text);
+    border: 1px solid rgba(255, 255, 255, 0.9);
+    border-radius: 15px;
+    padding: 11px 14px;
+    font: inherit;
+    width: 100%;
+    box-shadow: inset 0 1px 3px rgba(70, 80, 120, 0.08);
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  input:focus, textarea:focus, select:focus {
+    border-color: rgba(37, 99, 235, 0.55);
+    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.14);
+  }
+  textarea { resize: vertical; min-height: 60px; }
+  label { display: block; color: var(--text-soft); font-size: 12.5px; font-weight: 600; margin: 12px 0 5px; letter-spacing: 0.3px; }
+
+  .tabs {
+    display: flex; gap: 4px;
+    background: rgba(255, 255, 255, 0.45);
+    border: 1px solid var(--glass-border);
+    border-radius: 18px;
+    padding: 4px;
+    margin-bottom: 14px;
+    width: fit-content;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.9);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+  }
+  .tabs button {
+    border: none; background: transparent; padding: 7px 20px; border-radius: 14px;
+    font-size: 14px; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
+  }
+  .tabs button.active {
+    background: var(--text);
+    color: #fff;
+    box-shadow: 0 3px 10px rgba(28, 32, 48, 0.3);
+  }
+
+  .badge {
+    display: inline-block; padding: 2px 10px; border-radius: 99px;
+    font-size: 12px; font-weight: 600;
+    background: rgba(255,255,255,0.6); border: 1px solid rgba(255,255,255,0.9);
+    color: var(--text-soft);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  }
+  .badge.ok { color: var(--ok); background: rgba(224, 250, 238, 0.75); border-color: rgba(14, 159, 110, 0.35); }
+  .badge.err { color: var(--err); background: rgba(255, 230, 230, 0.75); border-color: rgba(229, 72, 77, 0.4); }
+  .badge.rec { color: #fff; background: rgba(229, 72, 77, 0.9); border-color: rgba(255,255,255,0.5); animation: pulse 1.6s infinite; }
+  @keyframes pulse { 50% { opacity: 0.55; } }
+
+  .muted { color: var(--text-soft); font-size: 12.5px; }
+  a { color: var(--accent); text-decoration: none; font-weight: 600; }
+
+  .q-card {
+    background: rgba(255, 255, 255, 0.6);
+    border: 1px solid rgba(255, 255, 255, 0.9);
+    border-radius: 20px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.95), 0 2px 8px rgba(70,80,120,0.08);
+  }
+  .q-card h4 { margin: 0 0 6px; font-size: 15px; }
+  .reply {
+    border-left: 3px solid var(--accent);
+    background: rgba(255,255,255,0.5);
+    padding: 8px 12px; margin: 7px 0; border-radius: 6px 14px 14px 6px;
+  }
+  .reply .tag { font-size: 11px; font-weight: 700; color: var(--accent); letter-spacing: 0.5px; }
+  .reply p { margin: 4px 0; }
+
+  .t-entry { padding: 5px 0; border-bottom: 1px dashed rgba(90, 95, 116, 0.18); display: flex; gap: 10px; }
+  .t-entry time { color: var(--text-soft); font-size: 11.5px; flex: none; padding-top: 3px; font-variant-numeric: tabular-nums; }
+  .empty { text-align: center; color: var(--text-soft); padding: 42px 0; font-size: 14px; }
+
+  .hist-item {
+    display: flex; gap: 10px; align-items: center; padding: 10px 6px;
+    border-bottom: 1px solid rgba(255,255,255,0.7); cursor: pointer; border-radius: 12px;
+    transition: background 0.15s;
+  }
+  .hist-item:hover { background: rgba(255,255,255,0.5); }
+  .hist-item:active { transform: scale(0.985); }
+
+  .toast {
+    position: fixed; bottom: calc(24px + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%) translateY(8px);
+    background: rgba(28, 32, 48, 0.88);
+    color: #fff; border: 1px solid rgba(255,255,255,0.25);
+    border-radius: 18px; padding: 10px 22px;
+    font-size: 14px; font-weight: 500;
+    opacity: 0; transition: opacity 0.25s, transform 0.25s;
+    pointer-events: none; z-index: 99;
+    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    box-shadow: 0 10px 32px rgba(28, 32, 48, 0.35);
+    max-width: 86vw; text-align: center;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  dialog {
+    background: var(--glass-strong);
+    color: var(--text);
+    border: 1px solid var(--glass-border);
+    border-radius: 28px;
+    max-width: 640px; width: 92%; padding: 0;
+    box-shadow: 0 24px 64px rgba(28, 32, 48, 0.3);
+    backdrop-filter: blur(30px) saturate(1.6);
+    -webkit-backdrop-filter: blur(30px) saturate(1.6);
+  }
+  dialog::backdrop { background: rgba(28, 32, 48, 0.35); backdrop-filter: blur(8px); }
+  dialog .inner { padding: 20px 22px; }
+  dialog h3 { margin: 0 0 10px; font-size: 17px; }
+  dialog .actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 22px; border-top: 1px solid rgba(255,255,255,0.6); }
+
+  /* 录音按钮区（会中页顶） */
+  .rec-head { display: flex; align-items: center; gap: 10px; }
+  .rec-head .time { font-variant-numeric: tabular-nums; font-size: 17px; font-weight: 700; }
+  .pulse-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--err); box-shadow: 0 0 0 0 rgba(229,72,77,0.5); animation: ring 1.8s infinite; }
+  @keyframes ring { 70% { box-shadow: 0 0 0 12px rgba(229,72,77,0); } 100% { box-shadow: 0 0 0 0 rgba(229,72,77,0); } }
 </style>
 </head>
 <body>
+<div class="blobs"><div class="blob"></div><div class="blob"></div><div class="blob"></div></div>
 <div class="app" id="app"></div>
 <div class="toast" id="toast"></div>
 <script type="module" src="./app.js"></script>
