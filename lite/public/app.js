@@ -53,6 +53,7 @@ function renderHome() {
       <span class="badge ${status?.llm?.configured ? 'ok' : 'err'}" id="lBadge">AI</span>
       <button data-go="settings">设置</button>
     </header>
+    <div id="micBanner"></div>
     <div class="card" style="text-align:center;padding:32px 24px">
       ${rec
         ? `<div class="row" style="justify-content:center;gap:12px"><span class="badge rec">录音中 ${fmtTime(Date.now() - rec.startedAt)}</span></div>`
@@ -70,6 +71,17 @@ function renderHome() {
       <div id="history"></div>
     </div>`;
   bindNav();
+  // 麦克风权限被拒时显示常驻横幅（toast 只闪 3 秒容易错过）
+  if (!rec) {
+    navigator.permissions?.query({ name: 'microphone' }).then(st => {
+      if (st.state === 'denied') {
+        $('#micBanner').innerHTML = `<div class="card" style="border-color:rgba(229,72,77,0.5);padding:12px 16px">
+          <span class="badge err">麦克风被拒</span>
+          <span class="muted">这个窗口拿不到麦克风。请复制 <b>http://127.0.0.1:8787</b> 到 Chrome / Edge 打开，授权一次即可。</span>
+        </div>`;
+      }
+    }).catch(() => { });
+  }
   $('#refreshBtn').onclick = async () => { await refreshStatus(); renderHome(); };
   const history = status?.recordings ?? [];
   $('#history').innerHTML = history.length ? history.map(r => `
