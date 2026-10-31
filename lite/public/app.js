@@ -154,6 +154,8 @@ async function renderPrepare() {
 // ===================== 设置 =====================
 async function renderSettings() {
   const [voice, llm] = await Promise.all([api('voice-config'), api('llm-config')]);
+  const profiles = llm.profiles ?? [];
+  const activeId = llm.activeProfile;
   $('#app').innerHTML = `
     <header style="display:flex;align-items:center;gap:12px;padding:10px 0 18px">
       <button data-go="">←</button><h1 style="font-size:18px;margin:0;flex:1">设置</h1>
@@ -168,16 +170,114 @@ async function renderSettings() {
       <input id="cfgAsrModel" value="${esc(voice.model)}">
     </div>
     <div class="card">
-      <strong>AI 建议</strong>
+      <div class="row" style="justify-content:space-between">
+        <strong>AI 建议</strong>
+        <span class="muted">OpenAI 兼容接口</span>
+      </div>
+      ${profiles.length ? `
+        <label>厂商预设（点击一键切换）</label>
+        <div id="profileList">${profiles.map(p => `
+          <div class="row" style="justify-content:space-between;padding:6px 4px;border-bottom:1px dashed var(--border)">
+            <span>${esc(p.name)} <span class="muted">${esc(p.model)}</span></span>
+            <span class="grow"></span>
+            ${p.id === activeId ? '<span class="badge ok">使用中</span>' : `<button data-activate="${p.id}">切换</button>`}
+            <button data-del="${p.id}" style="color:var(--err)">删</button>
+          </div>`).join('')}
+        </div>` : '<p class="muted" style="margin-bottom:4px">还没有预设：填好下面三项后点「存为预设」，以后一键切换。</p>'}
       <label>Base URL</label>
-      <input id="cfgLlmBase" value="${esc(llm.baseUrl)}" placeholder="https://api.deepseek.com/v1">
+      <input id="cfgLlmBase" value="${esc(llm.baseUrl)}" placeholder="https://api.deepseek.com">
       <label>模型</label>
-      <input id="cfgLlmModel" value="${esc(llm.model)}" placeholder="deepseek-chat">
+      <div class="row">
+        <input id="cfgLlmModel" value="${esc(llm.model)}" placeholder="deepseek-chat" style="flex:1">
+        <button id="fetchModelsBtn">获取模型列表</button>
+      </div>
+      <div id="modelList"></div>
       <label>API Key</label>
       <input id="cfgLlmKey" type="password" placeholder="${llm.configured ? '已保存' : '必填'}">
+      <div class="row" style="margin-top:12px">
+        <button id="testBtn">测试连接</button>
+        <button id="saveProfileBtn">存为预设</button>
+        <span class="grow"></span>
+      </div>
+      <div id="testResult" class="muted"></div>
     </div>
     <button class="big primary" id="saveCfgBtn">保存</button>`;
   bindNav();
+
+  const llmDraft = () => {
+    const draft = { baseUrl: $('#cfgLlmBase').value.trim(), model: $('#cfgLlmModel').value.trim() };
+    if ($('#cfgLlmKey').value.trim()) draft.apiKey = $('#cfgLlmKey').value.trim();
+    return draft;
+  };
+  // Key 输入框有值时优先用输入值，否则后端用已保存的
+  const llmDraftFull = () => {
+    const draft = llmDraft();
+    if (!draft.apiKey) delete draft.apiKey; // 后端缺 apiKey 时回退已保存 key
+    return draft;
+  };
+
+  $('#fetchModelsBtn').onclick = async () => {
+    const btn = $('#fetchModelsBtn');
+    btn.disabled = true; btn.textContent = '获取中…';
+    $('#modelList').innerHTML = '';
+    try {
+      const draft = llmDraft();
+      const { models } = await api('llm/models', draft.apiKey ? draft : { baseUrl: draft.baseUrl });
+      $('#modelList').innerHTML = `<div class="q-card" style="max-height:200px;overflow:auto">${models.map(m => `<div data-model="${esc(m)}" style="padding:3px 0;cursor:pointer">· ${esc(m)}</div>`).join('')}</div>`;
+      $('#modelList').querySelectorAll('[data-model]').forEach(el => el.onclick = () => {
+        $('#cfgLlmModel').value = el.dataset.model;
+        $('#modelList').innerHTML = '';
+        toast(`已选模型：${el.dataset.model}`);
+      });
+    } catch (e) { toast(e.message); }
+    btn.disabled = false; btn.textContent = '获取模型列表';
+  };
+
+  $('#testBtn').onclick = async () => {
+    const btn = $('#testBtn');
+    btn.disabled = true; btn.textContent = '测试中…';
+    $('#testResult').textContent = '';
+    try {
+      const draft = llmDraft();
+      if (!draft.model) throw new Error('先填模型名');
+      const r = await api('llm/test', draft);
+      $('#testResult').innerHTML = `<span class="badge ok">可用</span> 首字 ${r.ttfbMs}ms · 总 ${(r.totalMs / 1000).toFixed(1)}s · 回复「${esc(r.text.slice(0, 20))}」`;
+    } catch (e) {
+      $('#testResult').innerHTML = `<span class="badge err">失败</span> ${esc(e.message)}`;
+    }
+    btn.disabled = false; btn.textContent = '测试连接';
+  };
+
+  $('#saveProfileBtn').onclick = async () => {
+    const draft = llmDraft();
+    try {
+      if (!draft.baseUrl || !draft.model) throw new Error('Base URL 和模型都填好才能存预设');
+      if (!draft.apiKey) throw new Error('API Key 填上才能存预设（预设里保存的是这家的 Key）');
+      const name = prompt('预设名称（比如：DeepSeek / 公司网关）', draft.baseUrl.match(/https?:\/\/([^/]+)/)?.[1] ?? '') ?? '';
+      if (!name) return;
+      await api('llm/profiles', { name, baseUrl: draft.baseUrl, model: draft.model, apiKey: draft.apiKey });
+      await renderSettings();
+      toast('预设已保存');
+    } catch (e) { toast(e.message); }
+  };
+
+  document.querySelectorAll('[data-activate]').forEach(el => el.onclick = async () => {
+    try {
+      await api('llm/profiles/activate', { id: el.dataset.activate });
+      await refreshStatus();
+      await renderSettings();
+      toast('已切换');
+    } catch (e) { toast(e.message); }
+  });
+  document.querySelectorAll('[data-del]').forEach(el => el.onclick = async () => {
+    if (!confirm('删除这个预设？')) return;
+    try {
+      await api('llm/profiles/delete', { id: el.dataset.del });
+      await renderSettings();
+      toast('已删除');
+    } catch (e) { toast(e.message); }
+  });
+
   $('#saveCfgBtn').onclick = async () => {
     try {
       const voiceDraft = {};
@@ -185,9 +285,8 @@ async function renderSettings() {
       if ($('#cfgWsBase').value.trim()) voiceDraft.wsBase = $('#cfgWsBase').value.trim();
       if ($('#cfgAsrModel').value.trim()) voiceDraft.model = $('#cfgAsrModel').value.trim();
       if (Object.keys(voiceDraft).length) await api('voice-config', voiceDraft);
-      const llmDraft = { baseUrl: $('#cfgLlmBase').value.trim(), model: $('#cfgLlmModel').value.trim() };
-      if ($('#cfgLlmKey').value.trim()) llmDraft.apiKey = $('#cfgLlmKey').value.trim();
-      if (llmDraft.baseUrl || llmDraft.model) await api('llm-config', llmDraft);
+      const draft = llmDraft();
+      if (draft.baseUrl || draft.model) await api('llm-config', draft);
       await refreshStatus();
       toast('已保存');
       location.hash = '#/';

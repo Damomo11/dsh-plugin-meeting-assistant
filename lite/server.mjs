@@ -18,7 +18,7 @@ import { DashscopeAsrStream, ResilientAsrSession } from '../src/vendor/voice-ker
 import { MeetingStore } from './store.mjs';
 import { MeetingCoach, BriefStore } from './coach.mjs';
 import { readConfig, saveVoiceConfig, voiceHome } from './config.mjs';
-import { chatCompletion, polishGoalRequest, llmConfigValid } from './llm.mjs';
+import { chatCompletion, polishGoalRequest, llmConfigValid, listModels, testModel } from './llm.mjs';
 import { loadProjectContext } from './project-context.mjs';
 import { redactCredentials } from './redact.mjs';
 import { formatLogLine } from './diag.mjs';
@@ -52,6 +52,13 @@ function saveLlmConfig(draft) {
   };
   if (typeof next.baseUrl !== 'string' || !/^https?:\/\//.test(next.baseUrl)) throw new Error('LLM Base URL 必须是 http(s):// 地址。');
   if (!next.model?.trim()) throw new Error('请填写模型名。');
+  // Key 明显是 URL 时直接指出，别等 401 才发现
+  if (next.apiKey && /^(https?:|sk-)/i.test(next.baseUrl) && /^https?:\/\//.test(next.apiKey.trim())) {
+    throw new Error('API Key 一栏填的看起来是个网址，请检查是否把 Base URL 粘到 Key 框里了。');
+  }
+  if (next.baseUrl.includes('/anthropic')) {
+    throw new Error('这是 Anthropic 协议端点，本工具走 OpenAI 兼容协议。请填 OpenAI 兼容地址（如 https://api.deepseek.com）。');
+  }
   const tmp = join(ROOT, `llm.json.${randomUUID()}.tmp`);
   writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 });
   renameSync(tmp, join(ROOT, 'llm.json'));
@@ -60,7 +67,53 @@ function saveLlmConfig(draft) {
 }
 function publicLlmConfig() {
   const c = llmConfig();
-  return { baseUrl: c.baseUrl, model: c.model, configured: llmConfigValid(c) };
+  const profiles = readLlmProfiles();
+  return { baseUrl: c.baseUrl, model: c.model, configured: llmConfigValid(c), profiles, activeProfile: findActiveProfile(c, profiles) };
+}
+
+// ---- 多厂商预设：profiles.json 存多家 {name, baseUrl, model, apiKey}，一键切换即写回 llm.json ----
+function profilesPath() { return join(ROOT, 'llm-profiles.json'); }
+function readLlmProfiles() {
+  try { return JSON.parse(readFileSync(profilesPath(), 'utf8')); } catch { return []; }
+}
+function writeLlmProfiles(list) {
+  const tmp = join(ROOT, `llm-profiles.json.${randomUUID()}.tmp`);
+  writeFileSync(tmp, JSON.stringify(list, null, 2), { mode: 0o600 });
+  renameSync(tmp, profilesPath());
+  chmodSync(profilesPath(), 0o600);
+}
+function findActiveProfile(cfg, profiles) {
+  return profiles.find(p => p.baseUrl === cfg.baseUrl && p.model === cfg.model && p.apiKey === cfg.apiKey)?.id ?? null;
+}
+function upsertProfile(draft) {
+  if (!draft || typeof draft !== 'object') throw new Error('无效的预设。');
+  const profiles = readLlmProfiles();
+  const entry = {
+    id: typeof draft.id === 'string' && /^[a-zA-Z0-9_-]{1,40}$/.test(draft.id) ? draft.id : randomUUID().slice(0, 8),
+    name: String(draft.name ?? '').trim().slice(0, 40) || '未命名',
+    baseUrl: String(draft.baseUrl ?? '').trim(),
+    model: String(draft.model ?? '').trim(),
+    apiKey: String(draft.apiKey ?? '').trim(),
+  };
+  if (!/^https?:\/\//.test(entry.baseUrl)) throw new Error('Base URL 必须是 http(s)://。');
+  if (!entry.model) throw new Error('请填写模型名。');
+  if (!entry.apiKey) throw new Error('请填写 API Key。');
+  if (entry.baseUrl.includes('/anthropic')) throw new Error('Anthropic 协议端点不受支持，请填 OpenAI 兼容地址。');
+  const existing = profiles.findIndex(p => p.id === entry.id);
+  if (existing >= 0) profiles[existing] = entry; else profiles.push(entry);
+  writeLlmProfiles(profiles);
+  return entry;
+}
+function deleteProfile(id) {
+  const profiles = readLlmProfiles().filter(p => p.id !== id);
+  writeLlmProfiles(profiles);
+  return { deleted: true };
+}
+function activateProfile(id) {
+  const p = readLlmProfiles().find(x => x.id === id);
+  if (!p) throw new Error('预设不存在。');
+  saveLlmConfig({ baseUrl: p.baseUrl, model: p.model, apiKey: p.apiKey });
+  return publicLlmConfig();
 }
 
 // ---- 录音服务：对应原插件 MeetingService，但事件用 SSE 推给页面而不是靠 1.5s 轮询。
@@ -357,6 +410,29 @@ async function route(req, res, pathname) {
     coach.suspend();
     try { return json(res, 200, saveLlmConfig(body)); } finally { coach.resume(); }
   }
+  // 列出该 baseUrl 下的模型（用表单里填的临时配置，不必先保存）
+  if (api === 'llm/models' && req.method === 'POST') {
+    const cfg = { baseUrl: String(body.baseUrl ?? llmConfig().baseUrl), model: 'x', apiKey: String(body.apiKey ?? llmConfig().apiKey) };
+    if (!cfg.baseUrl || !cfg.apiKey) throw new Error('请先填写 Base URL 和 API Key。');
+    return json(res, 200, { models: await listModels(cfg) });
+  }
+  // 测试模型可用性：发一句真实请求
+  if (api === 'llm/test' && req.method === 'POST') {
+    const current = llmConfig();
+    const cfg = {
+      baseUrl: String(body.baseUrl ?? current.baseUrl),
+      model: String(body.model ?? current.model),
+      apiKey: String(body.apiKey ?? current.apiKey),
+    };
+    if (!cfg.baseUrl || !cfg.model || !cfg.apiKey) throw new Error('Base URL / 模型 / API Key 都要有才能测试。');
+    const result = await testModel(cfg);
+    return json(res, 200, { ok: true, ...result });
+  }
+  // 预设管理
+  if (api === 'llm/profiles' && req.method === 'GET') return json(res, 200, { profiles: readLlmProfiles() });
+  if (api === 'llm/profiles' && req.method === 'POST') return json(res, 200, upsertProfile(body));
+  if (api === 'llm/profiles/delete' && req.method === 'POST') return json(res, 200, deleteProfile(body.id));
+  if (api === 'llm/profiles/activate' && req.method === 'POST') return json(res, 200, activateProfile(body.id));
 
   if (api === 'brief' && req.method === 'GET') {
     const recordingId = body.recordingId || undefined;
