@@ -69,6 +69,9 @@ export async function chatCompletion(cfg, { system, prompt }, { timeoutMs = 90_0
           { role: 'user', content: prompt },
         ],
         temperature: 0.5,
+        // 推理模型的思考强度：low 让首正文 token 更早出现（实测 flash high≈3-6s / low≈可用但不保证）。
+        // 非推理模型（deepseek-chat 等）不认这个参数——带上也无碍，OpenAI 网关忽略未知字段。
+        reasoning_effort: cfg.effort ?? 'low',
         stream: true,
       }),
       signal: controller.signal,

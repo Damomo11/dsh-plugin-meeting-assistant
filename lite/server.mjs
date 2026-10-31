@@ -44,14 +44,18 @@ const llmConfig = () => {
     baseUrl: saved.baseUrl ?? process.env.OPENAI_BASE_URL ?? '',
     model: saved.model ?? process.env.OPENAI_MODEL ?? '',
     apiKey: saved.apiKey ?? process.env.OPENAI_API_KEY ?? '',
+    effort: saved.effort ?? 'low',
   };
 };
 function saveLlmConfig(draft) {
   const previous = llmConfig();
+  // 只改 effort（baseUrl 留空）也应可保存：空串字段沿用已存的
+  const pick = (v, fallback) => (typeof v === 'string' && v.trim() ? v : fallback);
   const next = {
-    baseUrl: draft.baseUrl ?? previous.baseUrl,
-    model: draft.model ?? previous.model,
-    apiKey: draft.apiKey ?? previous.apiKey,
+    baseUrl: pick(draft.baseUrl, previous.baseUrl),
+    model: pick(draft.model, previous.model),
+    apiKey: pick(draft.apiKey, previous.apiKey),
+    effort: ['low', 'high', 'max'].includes(draft.effort) ? draft.effort : previous.effort ?? 'low',
   };
   if (typeof next.baseUrl !== 'string' || !/^https?:\/\//.test(next.baseUrl)) throw new Error('LLM Base URL 必须是 http(s):// 地址。');
   if (!next.model?.trim()) throw new Error('请填写模型名。');
@@ -71,7 +75,7 @@ function saveLlmConfig(draft) {
 function publicLlmConfig() {
   const c = llmConfig();
   const profiles = readLlmProfiles();
-  return { baseUrl: c.baseUrl, model: c.model, configured: llmConfigValid(c), profiles, activeProfile: findActiveProfile(c, profiles) };
+  return { baseUrl: c.baseUrl, model: c.model, effort: c.effort ?? 'low', configured: llmConfigValid(c), profiles, activeProfile: findActiveProfile(c, profiles) };
 }
 
 // ---- 多厂商预设：profiles.json 存多家 {name, baseUrl, model, apiKey}，一键切换即写回 llm.json ----

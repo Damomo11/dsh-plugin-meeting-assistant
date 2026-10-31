@@ -195,6 +195,15 @@ async function renderSettings() {
       <div id="modelList"></div>
       <label>API Key</label>
       <input id="cfgLlmKey" type="password" placeholder="${llm.configured ? '已保存' : '必填'}">
+      <label>思考强度（推理模型；越低越快出字）</label>
+      <div class="row">
+        <select id="cfgEffort" style="flex:1">
+          <option value="low" ${llm.effort !== 'high' && llm.effort !== 'max' ? 'selected' : ''}>low · 最快（推荐会中使用）</option>
+          <option value="high" ${llm.effort === 'high' ? 'selected' : ''}>high · 慎重（默认）</option>
+          <option value="max" ${llm.effort === 'max' ? 'selected' : ''}>max · 深思（最慢）</option>
+        </select>
+      </div>
+      <p class="muted" style="margin:4px 0 0">提示：非推理模型（如 deepseek-chat）出字最快，首字约 0.5 秒。</p>
       <div class="row" style="margin-top:12px">
         <button id="testBtn">测试连接</button>
         <button id="saveProfileBtn">存为预设</button>
@@ -287,7 +296,8 @@ async function renderSettings() {
       if ($('#cfgAsrModel').value.trim()) voiceDraft.model = $('#cfgAsrModel').value.trim();
       if (Object.keys(voiceDraft).length) await api('voice-config', voiceDraft);
       const draft = llmDraft();
-      if (draft.baseUrl || draft.model) await api('llm-config', draft);
+      draft.effort = $('#cfgEffort').value;
+      await api('llm-config', draft);
       await refreshStatus();
       toast('已保存');
       location.hash = '#/';
