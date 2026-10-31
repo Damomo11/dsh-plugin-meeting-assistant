@@ -112,6 +112,8 @@ function startRecording() {
   const timer = setInterval(() => {
     const current = active;
     if (!current || current.token !== token || current.stopping) return;
+    // 调试会话没有音频流，30 秒无人发言提示但不停止
+    if (current.session.constructor === DebugAsrSession) return;
     if (Date.now() - current.lastAudio > 15000) {
       void stopRecording(token, '麦克风连接已中断，录音已自动停止。');
       return;
@@ -125,6 +127,55 @@ function startRecording() {
     log('asr', `会话启动失败: ${redact(String(e))}`);
     return stopRecording(token, redact(String(e)));
   });
+  coach.started(meta);
+  return { token, recording: meta };
+}
+
+// ---- 调试模式：与 ResilientAsrSession 同接口的假会话，say() 直接触发出句回调，
+//      不连 ASR、不碰麦克风，建议链路与真实录音完全一致。
+class DebugAsrSession {
+  constructor(hooks) { this.hooks = hooks; this.meta = null; this.line = 0; }
+  get stats() { return { fedBytes: 0, bufferedBytes: 0, queuedBytes: 0, reconnects: 0, droppedBytes: 0, wsState: 'ready' }; }
+  async start() { this.hooks.onState?.('ready'); }
+  async stop() { this.hooks.onState?.('stopped'); return Buffer.alloc(0); }
+  forceDrop() { }
+  say(text) {
+    this.line++;
+    const s = { text, beginMs: 0, endMs: 500, sentenceId: this.line, wallTs: Date.now() };
+    this.hooks.onSentence(s);
+    return s;
+  }
+}
+
+function startDebugRecording() {
+  if (active) throw new Error('已有会议正在录音，请先结束当前录音。');
+  briefs.initialize(SESSION_ID);
+  const meta = store.create(SESSION_ID);
+  store.select(SESSION_ID, meta.id);
+  const token = randomUUID();
+  const brief = briefs.read(SESSION_ID, meta.id);
+  Object.assign(meta, { autoEnabled: brief.autoEnabled });
+  const session = new DebugAsrSession({
+    onSentence: s => {
+      try {
+        const entry = store.append(meta, s);
+        coach.transcribed(meta, entry);
+        broadcast('transcript', { recordingId: meta.id, entry });
+      } catch (e) { void stopRecording(token, String(e)); }
+    },
+    onState: state => {
+      if (meta.endedAt || meta.state === 'stopping') return;
+      meta.wsState = state;
+      meta.state = state === 'ready' ? 'recording' : state === 'stopped' ? 'stopped' : 'reconnecting';
+      store.save(meta);
+      broadcast('recording-state', { recordingId: meta.id, state: meta.state, wsState: state });
+    },
+    onLog: () => { },
+  });
+  const timer = setInterval(() => { }, 30_000);
+  timer.unref();
+  active = { meta, token, session, lastAudio: Date.now(), nextSequence: 0, timer };
+  void session.start();
   coach.started(meta);
   return { token, recording: meta };
 }
@@ -175,6 +226,7 @@ async function stopRecording(token, error) {
       if (active === current) active = undefined;
       broadcast('recording-state', { recordingId: current.meta.id, state: current.meta.state });
       broadcast('status', statusPayload());
+      return { stopped: true };
     }
   })();
   return current.stopping;
@@ -244,7 +296,16 @@ function readBody(req, limit = 2 * 1024 * 1024) {
 async function route(req, res, pathname) {
   // 页面与静态资源
   if (req.method === 'GET' && pathname === '/') return serveFile(res, join(__dirname, 'public', 'index.html'));
+  if (req.method === 'GET' && pathname === '/app.js') return serveFile(res, join(__dirname, 'public', 'app.js'), 'text/javascript; charset=utf-8');
   if (req.method === 'GET' && pathname === '/worklet.js') return serveFile(res, join(__dirname, 'worklet.mjs'), 'text/javascript; charset=utf-8');
+  // 其余静态资源（样式、图标等）一律从 public/ 下取，禁止出目录。
+  if (req.method === 'GET' && !pathname.startsWith('/api/') && !pathname.startsWith('/audio/')) {
+    const rel = pathname.replace(/^\/+/, '');
+    if (rel && !rel.split('/').includes('..')) {
+      const file = join(__dirname, 'public', rel);
+      if (existsSync(file) && statSync(file).isFile()) return serveFile(res, file);
+    }
+  }
   if (req.method === 'GET' && pathname === '/events') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
     res.write('retry: 2000\n\n');
@@ -304,8 +365,28 @@ async function route(req, res, pathname) {
 
   if (api === 'start' && req.method === 'POST') {
     const result = startRecording();
-    log('http', `start -> token=${result.token ? 'yes' : 'MISSING'} rid=${result.recording?.id}`);
     return json(res, 200, result);
+  }
+  // 调试模式：不开麦克风，走同一条录音/转写/建议链路。
+  if (api === 'debug/start' && req.method === 'POST') {
+    if (active) {
+      if (active.session.constructor !== DebugAsrSession) throw new Error('正在真实录音中，请先结束再调试。');
+      return json(res, 200, { recording: active.meta });
+    }
+    return json(res, 200, startDebugRecording());
+  }
+  if (api === 'debug/say' && req.method === 'POST') {
+    const current = active;
+    if (!current || current.session.constructor !== DebugAsrSession) throw new Error('请先开始调试会议。');
+    const text = String(body.text ?? '').trim();
+    if (!text || text.length > 2000) throw new Error('发言内容为空或过长。');
+    const entry = current.session.say(text);
+    return json(res, 200, { entry });
+  }
+  if (api === 'debug/stop' && req.method === 'POST') {
+    const current = active;
+    if (!current || current.session.constructor !== DebugAsrSession) throw new Error('没有进行中的调试会话。');
+    return json(res, 200, await stopRecording(current.token));
   }
   if (api === 'audio' && req.method === 'POST') return json(res, 200, acceptAudio(body.token, body.sequence, body.pcm));
   if (api === 'stop' && req.method === 'POST') return json(res, 200, await stopRecording(body.token));

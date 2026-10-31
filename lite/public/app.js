@@ -1,23 +1,22 @@
-// lite/public/app.js — 轻量版会议助手前端。
-// 交互与原插件面板对齐：会前准备（含 AI 润色）→ 录音三视图（回应/追问/转写）→ 历史回看导出。
-// 音频路径：AudioWorklet（lite/worklet.mjs 由服务端 /worklet.js 提供）→ 16k PCM → /api/audio。
+// 会议助手前端。单页 + hash 路由：#/ 首页，#/settings 设置，#/prepare 会前准备，#/debug 调试。
 
-const $ = id => document.getElementById(id);
+const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fmtTime = ms => {
-  const s = Math.floor(ms / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+  const s = Math.floor(ms / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
   const pad = n => String(n).padStart(2, '0');
-  return h ? `${pad(h)}:${pad(m)}:${pad(ss)}` : `${pad(m)}:${pad(ss)}`;
+  return h ? `${pad(h)}:${pad(m)}:${pad(s % 60)}` : `${pad(m)}:${pad(s % 60)}`;
 };
 const fmtClock = ts => new Date(ts).toLocaleTimeString('zh-CN', { hour12: false });
 const fmtDate = ts => new Date(ts).toLocaleString('zh-CN', { hour12: false });
 
 let toastTimer;
-function toast(message) {
-  $('toast').textContent = message;
-  $('toast').classList.add('show');
+function toast(msg) {
+  const el = $('#toast');
+  el.textContent = msg;
+  el.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => $('toast').classList.remove('show'), 3200);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 3000);
 }
 
 async function api(path, body, method) {
@@ -27,423 +26,478 @@ async function api(path, body, method) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error ?? `请求失败（${res.status}）`);
+  if (!res.ok) throw new Error(data.error ?? `请求失败 ${res.status}`);
   return data;
 }
 
-// ---------------- 全局状态 ----------------
-let brief = { invitation: '', goal: '', role: '', initialViews: '', cwd: '', autoEnabled: true };
-let capture = null;       // {stream, context, node, token, startedAt, sequence}
-let status = null;        // 最近一次 /api/status
-let coachStatus = null;   // 最近一次 coach 状态（轮询）
-let pendingAdvice = null;  // 有新建议时先不切换，等用户点
-let currentAdvice = null;
-let jobId = null;
-let statusTimer = null;
+let status = null;
+let capture = null;
 let activeRecordingId = null;
-let afterLine = 0;
-let loadingEarlier = false;
+let currentAdvice = null;
+let pollTimer = null;
+let brief = { invitation: '', goal: '', role: '', initialViews: '', cwd: '', autoEnabled: true };
 
-// ---------------- 会前准备 ----------------
-async function loadBrief() {
-  try { brief = await api('brief'); } catch { brief = { invitation: '', goal: '', role: '', initialViews: '', cwd: '', autoEnabled: true }; }
-  $('briefInvitation').value = brief.invitation ?? '';
-  $('briefGoal').value = brief.goal ?? '';
-  $('briefRole').value = brief.role ?? '';
-  $('briefViews').value = brief.initialViews ?? '';
-  $('briefCwd').value = brief.cwd ?? '';
-  $('autoAdvice').checked = brief.autoEnabled ?? true;
+async function refreshStatus() {
+  status = await api('status');
+  return status;
 }
 
-async function saveBrief() {
-  const draft = {
-    invitation: $('briefInvitation').value.trim(),
-    goal: $('briefGoal').value.trim(),
-    role: $('briefRole').value.trim(),
-    initialViews: $('briefViews').value.trim(),
-    autoEnabled: $('autoAdvice').checked,
-  };
-  if (!draft.invitation && !draft.goal && !draft.role && !draft.initialViews) {
-    return toast('会前准备可以先留空，但建议至少填「角色」');
+// ===================== 首页 =====================
+function renderHome() {
+  const rec = status?.active;
+  $('#app').innerHTML = `
+    <header style="display:flex;align-items:center;gap:12px;padding:10px 0 18px">
+      <h1 style="font-size:18px;margin:0;flex:1">会议助手</h1>
+      <span class="badge ${status?.voice?.configured ? 'ok' : 'err'}" id="vBadge">转写</span>
+      <span class="badge ${status?.llm?.configured ? 'ok' : 'err'}" id="lBadge">AI</span>
+      <button data-go="settings">设置</button>
+    </header>
+    <div class="card" style="text-align:center;padding:32px 24px">
+      ${rec
+        ? `<div class="row" style="justify-content:center;gap:12px"><span class="badge rec">录音中 ${fmtTime(Date.now() - rec.startedAt)}</span></div>`
+        : `<button class="big primary" id="startBtn">开始会议</button>`}
+      <div class="row" style="justify-content:center;margin-top:14px">
+        <button data-go="prepare">会前准备</button>
+        <button data-go="debug">调试</button>
+      </div>
+      ${!status?.voice?.configured || !status?.llm?.configured
+        ? `<p class="muted" style="margin-top:14px">转写或 AI 还没配置，<a href="#/settings">去设置</a></p>`
+        : ''}
+    </div>
+    <div class="card">
+      <div class="row" style="justify-content:space-between"><strong>历史会议</strong><button id="refreshBtn">刷新</button></div>
+      <div id="history"></div>
+    </div>`;
+  bindNav();
+  $('#refreshBtn').onclick = async () => { await refreshStatus(); renderHome(); };
+  const history = status?.recordings ?? [];
+  $('#history').innerHTML = history.length ? history.map(r => `
+    <div class="hist-item" data-open="${r.id}">
+      <span class="badge">${r.state === 'stopped' ? '结束' : r.state === 'interrupted' ? '中断' : '进行中'}</span>
+      <div class="grow"><div>${fmtDate(r.startedAt)}</div><div class="muted">${r.segments} 段</div></div>
+      <button>回看</button>
+    </div>`).join('') : '<div class="empty">还没有会议记录</div>';
+  $('#history').querySelectorAll('[data-open]').forEach(el => el.onclick = () => openHistory(el.dataset.open));
+  const startBtn = $('#startBtn');
+  if (startBtn) startBtn.onclick = startRecording;
+  if (rec) {
+    activeRecordingId = rec.id;
+    renderLive();
+  } else {
+    activeRecordingId = null;
   }
-  try {
-    brief = await api('brief', { ...draft, cwd: $('briefCwd').value.trim() });
-    toast('已保存会前准备');
-  } catch (e) { toast(e.message); }
 }
 
-$('polishBtn').onclick = async () => {
-  const goal = $('briefGoal').value.trim();
-  if (!goal) return toast('先写一句目标底稿，再点润色');
-  $('polishBtn').disabled = true; $('polishBtn').textContent = '润色中…';
-  try {
-    const { candidates } = await api('brief/polish', {
-      invitation: $('briefInvitation').value.trim(),
-      goal,
-      role: $('briefRole').value.trim(),
-      initialViews: $('briefViews').value.trim(),
-    });
-    const box = $('polishCandidates');
-    box.innerHTML = candidates.map((text, i) => `
-      <div class="q-card"><p>${esc(text)}</p>
-      <button data-polish="${i}">采用</button></div>`).join('');
-    box.querySelectorAll('[data-polish]').forEach(btn => btn.onclick = () => {
-      $('briefGoal').value = candidates[Number(btn.dataset.polish)];
-      $('polishArea').style.display = 'none';
-      toast('已替换目标底稿，记得保存准备');
-    });
-    $('polishArea').style.display = '';
-  } catch (e) { toast(e.message); }
-  $('polishBtn').disabled = false; $('polishBtn').textContent = '✨ AI 润色目标';
-};
-$('polishClose').onclick = () => { $('polishArea').style.display = 'none'; };
-$('saveBriefBtn').onclick = saveBrief;
+// ===================== 会前准备 =====================
+async function renderPrepare() {
+  brief = await api('brief');
+  $('#app').innerHTML = `
+    <header style="display:flex;align-items:center;gap:12px;padding:10px 0 18px">
+      <button data-go="">←</button><h1 style="font-size:18px;margin:0;flex:1">会前准备</h1>
+      <button class="primary" id="saveBriefBtn">保存</button>
+    </header>
+    <div class="card">
+      <label>会议邀请</label>
+      <textarea id="briefInvitation" rows="2">${esc(brief.invitation)}</textarea>
+      <label>我的目标</label>
+      <textarea id="briefGoal" rows="3">${esc(brief.goal)}</textarea>
+      <div class="row"><button id="polishBtn" ${status?.llm?.configured ? '' : 'disabled'}>润色</button></div>
+      <div id="polishArea"></div>
+    </div>
+    <div class="card">
+      <label>我的角色</label>
+      <textarea id="briefRole" rows="3">${esc(brief.role)}</textarea>
+      <label>初始观点</label>
+      <textarea id="briefViews" rows="3">${esc(brief.initialViews)}</textarea>
+      <label>项目目录</label>
+      <input id="briefCwd" value="${esc(brief.cwd)}">
+      <label style="display:flex;align-items:center;gap:6px;margin-top:12px"><input type="checkbox" id="autoAdvice" style="width:auto" ${brief.autoEnabled ? 'checked' : ''}>会议中自动生成建议</label>
+    </div>`;
+  bindNav();
+  $('#saveBriefBtn').onclick = async () => {
+    try {
+      brief = await api('brief', {
+        invitation: $('#briefInvitation').value.trim(),
+        goal: $('#briefGoal').value.trim(),
+        role: $('#briefRole').value.trim(),
+        initialViews: $('#briefViews').value.trim(),
+        cwd: $('#briefCwd').value.trim(),
+        autoEnabled: $('#autoAdvice').checked,
+      });
+      toast('已保存');
+    } catch (e) { toast(e.message); }
+  };
+  $('#polishBtn').onclick = async () => {
+    const goal = $('#briefGoal').value.trim();
+    if (!goal) return toast('先写一句目标');
+    $('#polishBtn').disabled = true;
+    try {
+      const { candidates } = await api('brief/polish', {
+        goal,
+        invitation: $('#briefInvitation').value.trim(),
+        role: $('#briefRole').value.trim(),
+        initialViews: $('#briefViews').value.trim(),
+      });
+      const area = $('#polishArea');
+      area.innerHTML = candidates.map((c, i) => `<div class="q-card">${esc(c)}<button data-use="${i}">采用</button></div>`).join('');
+      area.querySelectorAll('[data-use]').forEach(btn => btn.onclick = () => {
+        $('#briefGoal').value = candidates[Number(btn.dataset.use)];
+        area.innerHTML = '';
+        toast('已替换，记得保存');
+      });
+    } catch (e) { toast(e.message); }
+    $('#polishBtn').disabled = false;
+  };
+}
 
-// ---------------- 录音 ----------------
+// ===================== 设置 =====================
+async function renderSettings() {
+  const [voice, llm] = await Promise.all([api('voice-config'), api('llm-config')]);
+  $('#app').innerHTML = `
+    <header style="display:flex;align-items:center;gap:12px;padding:10px 0 18px">
+      <button data-go="">←</button><h1 style="font-size:18px;margin:0;flex:1">设置</h1>
+    </header>
+    <div class="card">
+      <strong>语音转写</strong>
+      <label>百炼 API Key</label>
+      <input id="cfgApiKey" type="password" placeholder="${voice.configured ? '已保存' : '必填'}">
+      <label>WebSocket 地址</label>
+      <input id="cfgWsBase" value="${esc(voice.wsBase)}">
+      <label>模型</label>
+      <input id="cfgAsrModel" value="${esc(voice.model)}">
+    </div>
+    <div class="card">
+      <strong>AI 建议</strong>
+      <label>Base URL</label>
+      <input id="cfgLlmBase" value="${esc(llm.baseUrl)}" placeholder="https://api.deepseek.com/v1">
+      <label>模型</label>
+      <input id="cfgLlmModel" value="${esc(llm.model)}" placeholder="deepseek-chat">
+      <label>API Key</label>
+      <input id="cfgLlmKey" type="password" placeholder="${llm.configured ? '已保存' : '必填'}">
+    </div>
+    <button class="big primary" id="saveCfgBtn">保存</button>`;
+  bindNav();
+  $('#saveCfgBtn').onclick = async () => {
+    try {
+      const voiceDraft = {};
+      if ($('#cfgApiKey').value.trim()) voiceDraft.apiKey = $('#cfgApiKey').value.trim();
+      if ($('#cfgWsBase').value.trim()) voiceDraft.wsBase = $('#cfgWsBase').value.trim();
+      if ($('#cfgAsrModel').value.trim()) voiceDraft.model = $('#cfgAsrModel').value.trim();
+      if (Object.keys(voiceDraft).length) await api('voice-config', voiceDraft);
+      const llmDraft = { baseUrl: $('#cfgLlmBase').value.trim(), model: $('#cfgLlmModel').value.trim() };
+      if ($('#cfgLlmKey').value.trim()) llmDraft.apiKey = $('#cfgLlmKey').value.trim();
+      if (llmDraft.baseUrl || llmDraft.model) await api('llm-config', llmDraft);
+      await refreshStatus();
+      toast('已保存');
+      location.hash = '#/';
+    } catch (e) { toast(e.message); }
+  };
+}
+
+// ===================== 录音（会中） =====================
 async function startRecording() {
-  // 先把界面上的准备存下来（录音开始后就绑死这一份 brief）
-  await saveBrief();
   try {
-    const started = await api('start');
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      video: false,
-    });
+    await api('brief', { ...brief, cwd: brief.cwd, autoEnabled: brief.autoEnabled, __touch: 1 }).catch(() => { });
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
     const context = new AudioContext();
     await context.resume();
     await context.audioWorklet.addModule('/worklet.js');
     const source = context.createMediaStreamSource(stream);
     const node = new AudioWorkletNode(context, 'meeting-assistant');
-    capture = { stream, context, node, token: started.token, recordingId: started.recording.id, startedAt: Date.now(), sequence: 0 };
+    const started = await api('start');
+    capture = { stream, context, node, token: started.token, startedAt: Date.now(), sequence: 0 };
     node.port.onmessage = async ev => {
-      if (ev.data === 'flushed' || !(ev.data instanceof Uint8Array)) return;
-      updateLevel(ev.data);
-      if (!capture) return;
+      if (ev.data === 'flushed' || !(ev.data instanceof Uint8Array) || !capture) return;
       let binary = '';
       for (const byte of ev.data) binary += String.fromCharCode(byte);
       try {
         await api('audio', { token: capture.token, sequence: capture.sequence, pcm: btoa(binary) });
         capture.sequence++;
       } catch (e) {
-        if (capture) { toast(`音频上传失败：${e.message}`); await stopRecording(); }
+        toast(`录音中断：${e.message}`);
+        await stopRecording();
       }
     };
     source.connect(node); node.connect(context.destination);
     activeRecordingId = started.recording.id;
-    afterLine = 0;
-    $('recordingCard').style.display = '';
-    $('prepareCard').style.display = 'none';
-    $('recState').textContent = '连接中';
-    startStatusPolling();
+    renderLive();
   } catch (e) {
-    toast(`开始录音失败：${e.message}`);
-    if (capture?.token) await api('stop', { token: capture.token }).catch(() => {});
-    capture = null;
+    toast(`无法开始：${e.message}`);
   }
-}
-
-function updateLevel(pcm) {
-  const view = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength);
-  let peak = 0;
-  for (let i = 0; i < pcm.byteLength; i += 2) peak = Math.max(peak, Math.abs(view.getInt16(i, true)) / 32768);
-  $('recLevel').style.width = `${Math.min(100, peak * 260)}%`;
 }
 
 async function stopRecording() {
-  const token = capture?.token;
-  const node = capture?.node, stream = capture?.stream, context = capture?.context;
+  const c = capture;
   capture = null;
-  if (node) { try { node.port.postMessage('flush'); } catch { /* noop */ } }
-  $('recState').textContent = '收尾中';
-  try {
-    if (token) await api('stop', { token });
-  } catch (e) { toast(`结束失败：${e.message}`); }
+  if (c?.node) { try { c.node.port.postMessage('flush'); } catch { } }
+  try { if (c?.token) await api('stop', { token: c.token }); } catch { }
   setTimeout(() => {
-    try { node?.disconnect(); } catch { }
-    stream?.getTracks().forEach(t => t.stop());
-    context?.close().catch?.(() => { });
+    try { c?.node?.disconnect(); } catch { }
+    c?.stream?.getTracks().forEach(t => t.stop());
+    c?.context?.close?.().catch?.(() => { });
   }, 400);
-  $('recordingCard').style.display = 'none';
-  $('prepareCard').style.display = '';
-  stopStatusPolling();
-  await refreshHistory();
-  toast('录音已结束，可在历史会议中回看');
+  if (pollTimer) clearInterval(pollTimer), pollTimer = null;
+  await refreshStatus();
+  renderHome();
 }
 
-$('startBtn').onclick = startRecording;
-$('stopBtn').onclick = stopRecording;
-
-// ---------------- 状态轮询 + SSE ----------------
-function startStatusPolling() {
-  stopStatusPolling();
-  statusTimer = setInterval(pollCoachStatus, 4000);
-}
-function stopStatusPolling() {
-  if (statusTimer) clearInterval(statusTimer), statusTimer = null;
-}
-async function pollCoachStatus() {
-  if (!activeRecordingId) return;
-  try {
-    coachStatus = await api(`coach/state?recordingId=${encodeURIComponent(activeRecordingId)}`, undefined, 'GET');
-    renderCoachStatus();
-    if (coachStatus.latestId && coachStatus.latestId !== currentAdvice?.id) {
-      if (!pendingAdvice || pendingAdvice !== coachStatus.latestId) {
-        pendingAdvice = coachStatus.latestId;
-        $('coachStatusText').innerHTML = '有新建议，<a href="#" id="viewNew">点击查看</a>';
-        $('viewNew').onclick = () => loadAdvice(pendingAdvice);
-      }
-    }
-  } catch { /* 状态拉取失败不打断录音 */ }
-}
-function renderCoachStatus() {
-  const s = coachStatus;
-  if (!s) return;
-  if (s.running) {
-    jobId = s.running.id;
-    $('coachStatusText').textContent = `分析中（${s.running.reason === 'manual' ? '手动' : s.running.reason === 'time' ? '定时' : '新内容'}触发，覆盖到第 ${s.running.throughLine} 段）…`;
-    $('cancelJobBtn').style.display = '';
-  } else {
-    jobId = null;
-    $('cancelJobBtn').style.display = 'none';
-    const pending = s.pendingLines > 0 ? ` · 新增 ${s.pendingLines} 段未分析` : '';
-    $('coachStatusText').textContent = s.error ? s.error : `已覆盖到第 ${s.throughLine} 段${pending}`;
-  }
-}
-$('cancelJobBtn').onclick = async () => {
-  if (!activeRecordingId) return;
-  try { await api('coach/cancel', { recordingId: activeRecordingId, jobId }); toast('已取消本次分析'); }
-  catch (e) { toast(e.message); }
-};
-$('regenBtn').onclick = async () => {
-  if (!activeRecordingId) return;
-  try { await api('coach/generate', { recordingId: activeRecordingId }); pollCoachStatus(); }
-  catch (e) { toast(e.message); }
-};
-
-// SSE：转写与录音状态实时到达
-const events = new EventSource('/events');
-events.addEventListener('transcript', ev => {
-  const { entry } = JSON.parse(ev.data);
-  appendTranscriptEntry(entry, $('transcript'));
-});
-events.addEventListener('recording-state', ev => {
-  const { state, wsState, error } = JSON.parse(ev.data);
-  if (state === 'recording') $('recState').textContent = '录音中';
-  else if (state === 'reconnecting') $('recState').textContent = '转写重连中';
-  else if (state === 'stopping') $('recState').textContent = '收尾中';
-  else if (state === 'stopped') $('recState').textContent = '已结束';
-  else $('recState').textContent = '连接中';
-  if (error) $('coachStatusText').textContent = `转写服务：${error}`;
-});
-setInterval(() => { if (capture) $('recTime').textContent = fmtTime(Date.now() - capture.startedAt); }, 500);
-
-// ---------------- 三视图渲染 ----------------
-document.querySelectorAll('#viewTabs button').forEach(btn => btn.onclick = () => {
-  document.querySelectorAll('#viewTabs button').forEach(b => b.classList.toggle('active', b === btn));
-  $('viewAdvice').style.display = btn.dataset.view === 'advice' ? '' : 'none';
-  $('viewAsk').style.display = btn.dataset.view === 'ask' ? '' : 'none';
-  $('viewTranscript').style.display = btn.dataset.view === 'transcript' ? '' : 'none';
-});
-
-function sourcesHtml(sources, evidence) {
-  if (!sources?.length) return '';
-  const labels = (evidence ?? []).map(e => [e.id, e.label]);
-  const text = sources.map(id => esc((labels.find(([k]) => k === id)?.[1]) ?? id)).join(' · ');
-  return `<div class="sources">来源：${text}</div>`;
+function renderLive() {
+  const rid = activeRecordingId;
+  $('#app').innerHTML = `
+    <header style="display:flex;align-items:center;gap:12px;padding:10px 0 18px">
+      <span class="badge rec" id="recState">录音中</span>
+      <span id="recTime" class="muted" style="font-size:16px"></span>
+      <span class="grow"></span>
+      <button id="stopBtn" style="border-color:var(--err);color:var(--err)">结束</button>
+    </header>
+    <div class="tabs" id="viewTabs">
+      <button data-view="advice" class="active">回应</button>
+      <button data-view="ask">追问</button>
+      <button data-view="transcript">转写</button>
+    </div>
+    <div id="viewAdvice">
+      <div class="row" style="justify-content:space-between;margin-bottom:8px">
+        <span class="muted" id="coachStatusText">等待建议</span>
+        <span class="grow"></span>
+        <button id="regenBtn">生成</button>
+      </div>
+      <div id="askedOfMe"><div class="empty">暂无建议</div></div>
+    </div>
+    <div id="viewAsk" style="display:none"><div id="askOthers"><div class="empty">暂无</div></div></div>
+    <div id="viewTranscript" style="display:none"><div id="transcript"><div class="empty">等待说话</div></div></div>`;
+  $('#stopBtn').onclick = stopRecording;
+  $('#regenBtn').onclick = async () => {
+    try { await api('coach/generate', { recordingId: rid }); } catch (e) { toast(e.message); }
+  };
+  document.querySelectorAll('#viewTabs button').forEach(btn => btn.onclick = () => {
+    document.querySelectorAll('#viewTabs button').forEach(b => b.classList.toggle('active', b === btn));
+    $('#viewAdvice').style.display = btn.dataset.view === 'advice' ? '' : 'none';
+    $('#viewAsk').style.display = btn.dataset.view === 'ask' ? '' : 'none';
+    $('#viewTranscript').style.display = btn.dataset.view === 'transcript' ? '' : 'none';
+  });
+  pollTimer = setInterval(pollCoach, 4000);
+  pollCoach();
+  // 恢复已有转写
+  api('read', { recordingId: rid, lines: 60, tail: true }).then(r => {
+    r.entries.forEach(e => appendTranscript(e));
+  }).catch(() => { });
+  setInterval(() => { if (capture) $('#recTime').textContent = fmtTime(Date.now() - capture.startedAt); }, 500);
 }
 
-function renderAdvice(advice) {
-  currentAdvice = advice;
-  pendingAdvice = null;
-  const c = advice.content;
-  $('adviceSummary').textContent = c.summary ? `本段重点：${c.summary}` : '';
-  $('askedOfMe').innerHTML = c.askedOfMe.map(q => `
-    <div class="q-card">
-      <h4>${esc(q.question)}</h4>
-      <div class="why">${esc(q.why)}</div>
-      <div class="reply"><span class="tag">精简版（可直接说）</span><p>${esc(q.conciseReply)}</p></div>
-      <div class="reply"><span class="tag">高情商版</span><p>${esc(q.tactfulReply)}</p></div>
-      ${sourcesHtml(q.sources, advice.evidence)}
-    </div>`).join('') || '<div class="empty">还没有建议，点「立即生成」</div>';
-  $('askOthers').innerHTML = c.askOthers.map(q => `
-    <div class="q-card">
-      <h4>${esc(q.question)}</h4>
-      <div class="why">目的：${esc(q.purpose)}</div>
-      <div class="why">时机：${esc(q.timing)}</div>
-      ${sourcesHtml(q.sources, advice.evidence)}
-    </div>`).join('') || '<div class="empty">暂无可追问的问题</div>';
-  const un = c.uncertainties?.length ? `<div class="muted" style="margin-top:6px">需确认：${c.uncertainties.map(esc).join('；')}</div>` : '';
-  $('coachStatusText').insertAdjacentHTML?.('afterend', '');
-  if (un) $('adviceSummary').insertAdjacentHTML('afterend', un);
-  $('coachStatusText').textContent = `建议生成于 ${fmtClock(advice.createdAt)}（${advice.model}）`;
-}
-
-async function loadAdvice(adviceId, recordingId) {
-  const id = recordingId ?? activeRecordingId;
-  if (!id) return;
-  try {
-    const advice = await api('coach/read', { recordingId: id, adviceId });
-    renderAdvice(advice);
-  } catch (e) { toast(e.message); }
-}
-
-// ---------------- 转写视图 ----------------
-function appendTranscriptEntry(entry, container) {
+function appendTranscript(entry) {
+  const box = $('#transcript');
+  if (!box) return;
+  if (box.querySelector('.empty')) box.innerHTML = '';
   const div = document.createElement('div');
   div.className = 't-entry';
   div.innerHTML = `<time>${fmtClock(entry.ts)}</time><span>${esc(entry.text)}</span>`;
-  container.appendChild(div);
-  while (container.children.length > 400) container.firstChild.remove();
-  container.parentElement.querySelector('.muted')?.remove;
-  container.scrollTop = container.scrollTop; // 不打断阅读位置
-  // 新转写到达时滚动到底（若用户本来就在底部附近）
-  if (container.scrollHeight - container.scrollTop - container.clientHeight < 160) {
-    container.lastElementChild?.scrollIntoView({ block: 'end' });
-  }
-}
-$('loadEarlier').onclick = async () => {
-  if (loadingEarlier || !activeRecordingId) return;
-  loadingEarlier = true;
-  try {
-    const result = await api('read', { recordingId: activeRecordingId, lines: 80, afterLine: 0 });
-    const box = $('transcript');
-    box.innerHTML = '';
-    result.entries.forEach(e => appendTranscriptEntry(e, box));
-    if (result.hasMore) toast('还有更早内容，再次点击继续加载');
-  } catch (e) { toast(e.message); }
-  loadingEarlier = false;
-};
-
-// ---------------- 设置 ----------------
-$('settingsBtn').onclick = async () => {
-  const [voice, llm] = await Promise.all([api('voice-config'), api('llm-config')]);
-  $('cfgWsBase').value = voice.wsBase ?? '';
-  $('cfgAsrModel').value = voice.model ?? '';
-  $('cfgLlmBase').value = llm.baseUrl ?? '';
-  $('cfgLlmModel').value = llm.model ?? '';
-  $('cfgApiKey').value = '';
-  $('cfgLlmKey').value = '';
-  $('settingsDialog').showModal();
-};
-$('saveCfgBtn').onclick = async () => {
-  try {
-    const voiceDraft = {};
-    if ($('cfgApiKey').value.trim()) voiceDraft.apiKey = $('cfgApiKey').value.trim();
-    if ($('cfgWsBase').value.trim()) voiceDraft.wsBase = $('cfgWsBase').value.trim();
-    if ($('cfgAsrModel').value.trim()) voiceDraft.model = $('cfgAsrModel').value.trim();
-    if (Object.keys(voiceDraft).length) await api('voice-config', voiceDraft);
-    const llmDraft = { baseUrl: $('cfgLlmBase').value.trim(), model: $('cfgLlmModel').value.trim() };
-    if ($('cfgLlmKey').value.trim()) llmDraft.apiKey = $('cfgLlmKey').value.trim();
-    if (llmDraft.baseUrl || llmDraft.model) await api('llm-config', llmDraft);
-    await refreshStatus();
-    toast('设置已保存');
-    $('settingsDialog').close();
-  } catch (e) { toast(e.message); }
-};
-
-// ---------------- 历史会议 ----------------
-async function refreshStatus() {
-  status = await api('status', undefined, 'GET');
-  $('llmBadge').textContent = status.llm.configured ? `LLM ${status.llm.model}` : 'LLM 未配置';
-  $('llmBadge').className = 'badge' + (status.llm.configured ? ' ok' : '');
-  $('voiceBadge').textContent = status.voice.configured ? '转写已配置' : '转写未配置';
-  $('voiceBadge').className = 'badge' + (status.voice.configured ? ' ok' : '');
-  $('polishBtn').disabled = !status.llm.configured;
-  return status;
+  box.appendChild(div);
+  while (box.children.length > 400) box.firstChild.remove();
 }
 
-async function refreshHistory() {
-  const status = await refreshStatus();
-  const box = $('history');
-  if (!status.recordings.length) {
-    box.innerHTML = '<div class="empty">还没有录音记录</div>';
-    return;
-  }
-  box.innerHTML = status.recordings.map(r => `
-    <div class="hist-item" data-id="${r.id}">
-      <span class="badge">${r.state === 'stopped' ? '已结束' : r.state === 'interrupted' ? '中断' : r.state}</span>
-      <div class="meta">
-        <div>${fmtDate(r.startedAt)}</div>
-        <div class="muted">${r.segments} 段转写${r.audioBytes ? ` · ${(r.audioBytes / 1024 / 1024).toFixed(1)}MB 音频` : ''}${r.error ? ` · ${esc(r.error.slice(0, 40))}` : ''}</div>
-      </div>
-      <span class="grow"></span>
-      <button data-open="${r.id}">回看</button>
-    </div>`).join('');
-  box.querySelectorAll('[data-open]').forEach(btn => btn.onclick = () => openHistory(btn.dataset.open));
-}
-
-let historyRecordingId = null;
-async function openHistory(recordingId) {
-  historyRecordingId = recordingId;
-  const result = await api('read', { recordingId, lines: 200 });
-  $('historyTitle').textContent = `会议记录 · ${fmtDate(result.recording.startedAt)}`;
-  renderHistoryView('advice');
+async function pollCoach() {
+  const rid = activeRecordingId;
+  if (!rid) return;
   try {
-    const coachState = await api(`coach/state?recordingId=${encodeURIComponent(recordingId)}`, undefined, 'GET');
-    if (coachState.latestId) {
-      const advice = await api('coach/read', { recordingId, adviceId: coachState.latestId });
-      $('histBody').dataset.advice = JSON.stringify(advice);
+    const s = await api(`coach/state?recordingId=${encodeURIComponent(rid)}`, undefined, 'GET');
+    const text = $('#coachStatusText');
+    if (!text) return;
+    if (s.running) {
+      text.textContent = '分析中…';
+    } else if (s.error) {
+      text.textContent = s.error;
     } else {
-      $('histBody').dataset.advice = '';
+      text.textContent = `已分析到第 ${s.throughLine} 段`;
+      if (s.latestId && s.latestId !== currentAdvice?.id) {
+        text.innerHTML = `<a href="#" id="newAdvice">有新建议，点击查看</a>`;
+        $('#newAdvice').onclick = () => loadAdvice(s.latestId);
+      }
     }
-  } catch { $('histBody').dataset.advice = ''; }
-  $('histBody').dataset.transcript = JSON.stringify(result.entries);
-  renderHistory('advice');
-  const wavUrl = `/audio/${recordingId}.wav`;
-  const audio = $('histAudio');
-  fetch(wavUrl, { method: 'HEAD' }).then(r => {
-    audio.style.display = r.ok ? '' : 'none';
-    if (r.ok) audio.src = wavUrl;
-  }).catch(() => { });
-  $('historyDialog').showModal();
+  } catch { }
 }
-document.querySelectorAll('#histTabs button').forEach(btn => btn.onclick = () => {
-  document.querySelectorAll('#histTabs button').forEach(b => b.classList.toggle('active', b === btn));
-  renderHistory(btn.dataset.hview);
-});
-function renderHistoryView() { }
-function renderHistory(view) {
-  const body = $('histBody');
-  if (view === 'advice') {
-    const advice = body.dataset.advice ? JSON.parse(body.dataset.advice) : null;
-    body.innerHTML = advice ? `
-      <div class="muted" style="margin-bottom:8px">${esc(advice.content.summary ?? '')}</div>
-      ${advice.content.askedOfMe.map(q => `
-        <div class="q-card"><h4>${esc(q.question)}</h4>
-        <div class="reply"><span class="tag">精简版</span><p>${esc(q.conciseReply)}</p></div>
-        <div class="reply"><span class="tag">高情商版</span><p>${esc(q.tactfulReply)}</p></div></div>`).join('')}
-      <div class="muted" style="margin-top:10px">可追问：</div>
-      ${advice.content.askOthers.map(q => `<div class="q-card"><h4>${esc(q.question)}</h4><div class="why">${esc(q.purpose ?? '')}</div></div>`).join('')}`
-      : '<div class="empty">这场会议没有生成过建议</div>';
-  } else {
-    const entries = body.dataset.transcript ? JSON.parse(body.dataset.transcript) : [];
-    body.innerHTML = entries.map(e => `<div class="t-entry"><time>${fmtClock(e.ts)}</time><span>${esc(e.text)}</span></div>`).join('')
-      || '<div class="empty">没有转写内容</div>';
-  }
-}
-$('exportTxt').onclick = () => {
-  const body = $('histBody');
-  const title = $('historyTitle').textContent;
-  const advice = body.dataset.advice ? JSON.parse(body.dataset.advice) : null;
-  const entries = body.dataset.transcript ? JSON.parse(body.dataset.transcript) : [];
-  const lines = [title, '', '—— 转写 ——', ...entries.map(e => `[${fmtClock(e.ts)}] ${e.text}`)];
-  if (advice) {
-    lines.push('', '—— 发言建议 ——');
-    for (const q of advice.content.askedOfMe) {
-      lines.push(`Q: ${q.question}`, `精简版: ${q.conciseReply}`, `高情商版: ${q.tactfulReply}`, '');
-    }
-  }
-  const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `会议记录-${historyRecordingId?.slice(0, 8) ?? 'export'}.txt`;
-  a.click();
-  URL.revokeObjectURL(a.href);
-};
-$('refreshHistory').onclick = refreshHistory;
 
-// ---------------- 启动 ----------------
-loadBrief();
-refreshStatus().then(refreshHistory);
-$('dataDir').textContent = '~/.agent-mesh/voice';
-window.addEventListener('beforeunload', () => { if (capture) api('stop', { token: capture.token }).catch(() => { }); });
+async function loadAdvice(adviceId) {
+  const rid = activeRecordingId;
+  if (!rid) return;
+  try {
+    const advice = await api('coach/read', { recordingId: rid, adviceId });
+    currentAdvice = advice;
+    const c = advice.content;
+    $('#askedOfMe').innerHTML = c.askedOfMe.map(q => `
+      <div class="q-card">
+        <h4>${esc(q.question)}</h4>
+        <div class="reply"><span class="tag">直接说</span><p>${esc(q.conciseReply)}</p></div>
+        <div class="reply"><span class="tag">展开说</span><p>${esc(q.tactfulReply)}</p></div>
+      </div>`).join('');
+    $('#askOthers').innerHTML = c.askOthers.map(q => `
+      <div class="q-card"><h4>${esc(q.question)}</h4><div class="muted">${esc(q.purpose)}</div></div>`).join('') || '<div class="empty">暂无</div>';
+    $('#coachStatusText').textContent = `建议来自最近 ${advice.throughLine} 段讨论`;
+  } catch (e) { toast(e.message); }
+}
+
+// ===================== 调试模式 =====================
+function renderDebug() {
+  $('#app').innerHTML = `
+    <header style="display:flex;align-items:center;gap:12px;padding:10px 0 18px">
+      <button data-go="">←</button><h1 style="font-size:18px;margin:0;flex:1">调试</h1>
+      <button class="primary" id="debugStart">开始调试会议</button>
+    </header>
+    <div class="card">
+      <p class="muted" style="margin-top:0">不碰麦克风：在这里打字模拟会议中的发言（比如领导说的话），验证转写落盘、建议生成是否正常。走的是和真实录音完全相同的链路。</p>
+      <textarea id="debugInput" rows="3" placeholder="例如：现在每个人说一下自己的目标"></textarea>
+      <div class="row" style="margin-top:10px">
+        <button id="debugSend">当作一句话发出去</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <strong>转写流</strong>
+        <button id="debugGen">手动生成建议</button>
+      </div>
+      <div id="debugTranscript"><div class="empty">还没输入</div></div>
+    </div>
+    <div class="card">
+      <div class="row" style="justify-content:space-between"><strong>最新建议</strong><span class="muted" id="debugStatus"></span></div>
+      <div id="debugAdvice"><div class="empty">还没有建议</div></div>
+    </div>`;
+  bindNav();
+  $('#debugStart').onclick = startDebug;
+  $('#debugSend').onclick = sendDebugLine;
+  $('#debugGen').onclick = async () => {
+    if (!debugRid) return toast('先开始调试会议');
+    try {
+      await api('coach/generate', { recordingId: debugRid });
+      setTimeout(refreshDebugAdvice, 2000);
+    } catch (e) { toast(e.message); }
+  };
+}
+
+let debugRid = null;
+async function startDebug() {
+  try {
+    await api('brief', { invitation: brief.invitation, goal: brief.goal, role: brief.role, initialViews: brief.initialViews, cwd: brief.cwd, autoEnabled: true });
+    const started = await api('debug/start', {});
+    debugRid = started.recording.id;
+    toast('调试会话已开始，直接输入发言');
+    $('#debugStart').disabled = true;
+  } catch (e) { toast(e.message); }
+}
+async function sendDebugLine() {
+  const text = $('#debugInput').value.trim();
+  if (!text) return;
+  if (!debugRid) await startDebug();
+  if (!debugRid) return;
+  try {
+    await api('debug/say', { recordingId: debugRid, text });
+    // 转写行由 SSE 推送渲染，这里只清输入
+    $('#debugInput').value = '';
+    setTimeout(refreshDebugAdvice, 2500);
+  } catch (e) { toast(e.message); }
+}
+async function refreshDebugAdvice() {
+  if (!debugRid) return;
+  try {
+    const s = await api(`coach/state?recordingId=${encodeURIComponent(debugRid)}`, undefined, 'GET');
+    $('#debugStatus').textContent = s.running ? '分析中…' : s.error ? s.error : `已分析 ${s.throughLine} 段`;
+    if (s.latestId) {
+      const advice = await api('coach/read', { recordingId: debugRid, adviceId: s.latestId });
+      $('#debugAdvice').innerHTML = advice.content.askedOfMe.map(q => `
+        <div class="q-card">
+          <h4>${esc(q.question)}</h4>
+          <div class="reply"><span class="tag">直接说</span><p>${esc(q.conciseReply)}</p></div>
+          <div class="reply"><span class="tag">展开说</span><p>${esc(q.tactfulReply)}</p></div>
+        </div>`).join('');
+    }
+  } catch { }
+}
+
+// ===================== 历史回看 =====================
+async function openHistory(recordingId) {
+  const [result, state] = await Promise.all([
+    api('read', { recordingId, lines: 200 }),
+    api(`coach/state?recordingId=${encodeURIComponent(recordingId)}`, undefined, 'GET').catch(() => null),
+  ]);
+  let advice = null;
+  if (state?.latestId) advice = await api('coach/read', { recordingId, adviceId: state.latestId }).catch(() => null);
+  const dlg = document.createElement('dialog');
+  dlg.innerHTML = `
+    <div class="inner">
+      <h3>${fmtDate(result.recording.startedAt)}</h3>
+      <div class="tabs"><button class="active" data-h="t">转写</button><button data-h="a">建议</button></div>
+      <div id="hBody" style="max-height:60vh;overflow:auto"></div>
+      <div class="actions"><button id="hExport">导出</button><button class="primary" id="hClose">关闭</button></div>
+    </div>`;
+  document.body.appendChild(dlg);
+  dlg.showModal();
+  const render = view => {
+    if (view === 't') {
+      $('#hBody', dlg).innerHTML = result.entries.map(e => `<div class="t-entry"><time>${fmtClock(e.ts)}</time><span>${esc(e.text)}</span></div>`).join('') || '<div class="empty">无转写</div>';
+    } else {
+      $('#hBody', dlg).innerHTML = advice ? advice.content.askedOfMe.map(q => `
+        <div class="q-card"><h4>${esc(q.question)}</h4>
+        <div class="reply"><span class="tag">直接说</span><p>${esc(q.conciseReply)}</p></div>
+        <div class="reply"><span class="tag">展开说</span><p>${esc(q.tactfulReply)}</p></div></div>`).join('') : '<div class="empty">无建议</div>';
+    }
+  };
+  dlg.querySelectorAll('[data-h]').forEach(btn => btn.onclick = () => {
+    dlg.querySelectorAll('[data-h]').forEach(b => b.classList.toggle('active', b === btn));
+    render(btn.dataset.h);
+  });
+  render('t');
+  dlg.querySelector('#hClose').onclick = () => dlg.close();
+  dlg.querySelector('#hExport').onclick = () => {
+    const lines = [`会议记录 ${fmtDate(result.recording.startedAt)}`, ''];
+    result.entries.forEach(e => lines.push(`[${fmtClock(e.ts)}] ${e.text}`));
+    if (advice) {
+      lines.push('', '建议');
+      advice.content.askedOfMe.forEach(q => lines.push(`问：${q.question}`, `答（简）：${q.conciseReply}`, `答（详）：${q.tactfulReply}`, ''));
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `会议记录-${recordingId.slice(0, 8)}.txt`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  dlg.onclose = () => dlg.remove();
+}
+
+// ===================== 路由 =====================
+function bindNav() {
+  document.querySelectorAll('[data-go]').forEach(el => el.onclick = () => { location.hash = el.dataset.go ? `#/${el.dataset.go}` : '#/'; });
+}
+
+async function route() {
+  const hash = location.hash.replace('#/', '').replace('#', '');
+  if (pollTimer) clearInterval(pollTimer), pollTimer = null;
+  await refreshStatus().catch(() => { });
+  if (hash === 'settings') return renderSettings();
+  if (hash === 'prepare') return renderPrepare();
+  if (hash === 'debug') return renderDebug();
+  return renderHome();
+}
+
+window.addEventListener('hashchange', route);
+
+// SSE：实时转写与录音状态
+const events = new EventSource('/events');
+events.addEventListener('transcript', ev => {
+  const { entry } = JSON.parse(ev.data);
+  if (location.hash === '#/debug') {
+    const box = $('#debugTranscript');
+    if (box && box.querySelector('.empty')) box.innerHTML = '';
+    const div = document.createElement('div');
+    div.className = 't-entry';
+    div.innerHTML = `<time>${fmtClock(entry.ts)}</time><span>${esc(entry.text)}</span>`;
+    box?.appendChild(div);
+  } else {
+    appendTranscript(entry);
+  }
+});
+events.addEventListener('recording-state', ev => {
+  const { state } = JSON.parse(ev.data);
+  const el = $('#recState');
+  if (el) el.textContent = state === 'recording' ? '录音中' : state === 'reconnecting' ? '重连中' : state === 'stopping' ? '收尾中' : state;
+});
+
+route();
