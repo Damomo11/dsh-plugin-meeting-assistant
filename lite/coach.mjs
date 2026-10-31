@@ -124,7 +124,7 @@ export class MeetingCoach {
         signal.throwIfAborted();
         if (!owns()) return;
         const input = buildCoachInput(brief, window.entries, previous, window.omittedLines, project);
-        const generated = await abortable(this.llm.chat(input, signal, sessionId), signal);
+        const generated = await abortable(this.llm.chat(input, signal, sessionId, meta.id), signal);
         signal.throwIfAborted();
         if (!owns()) return;
         const content = parseAdvice(generated.text, input.evidence);

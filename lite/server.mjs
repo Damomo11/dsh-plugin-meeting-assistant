@@ -71,11 +71,18 @@ function broadcast(event, data) {
   for (const res of liveClients) res.write(frame);
 }
 
-function startRecording() {
-  if (active) throw new Error('已有会议正在录音，请先结束当前录音。');
+async function startRecording() {
+  if (active) {
+    // 调试会话不是真录音：开始真会议时自动让它位
+    if (active.session.constructor === DebugAsrSession) await stopRecording(active.token).catch(() => { });
+    else throw new Error('已有会议正在录音，请先结束当前录音。');
+  }
   const config = readConfig(ROOT); // validateVoiceConfig 由 config.mjs 提供
   if (!config.apiKey) throw new Error('请先在设置中填写百炼 API Key。');
-  briefs.initialize(SESSION_ID); // 录音前必须确认过会前准备
+  // 首次没保存过准备时不再硬拦：建一份空准备（会前准备页随时可补）
+  const draft = briefs.read(SESSION_ID);
+  if (!draft.revision) await briefs.save(SESSION_ID, '', { invitation: '', goal: '', role: '', initialViews: '', autoEnabled: true }).catch(() => { });
+  briefs.initialize(SESSION_ID);
   const meta = store.create(SESSION_ID);
   store.select(SESSION_ID, meta.id);
   const token = randomUUID();
@@ -234,10 +241,18 @@ async function stopRecording(token, error) {
 
 // ---- 建议：LLM 配置由服务端持有；会话模型/子 Agent 两条路径合并为这一条。
 const coach = new MeetingCoach(store, {
-  chat: async (input, signal) => {
+  chat: async (input, signal, sessionId, metaId) => {
     const cfg = llmConfig();
     if (!llmConfigValid(cfg)) throw new Error('请先在设置中配置 LLM（Base URL / 模型 / API Key）。');
-    const result = await chatCompletion(cfg, input, { signal });
+    // 生成进度实时推给页面：边生成边看到写了多少字
+    let sent = 0;
+    const result = await chatCompletion(cfg, input, {
+      signal,
+      onDelta: delta => {
+        sent += delta.length;
+        if (metaId) broadcast('advice-progress', { recordingId: metaId, chars: sent });
+      },
+    });
     return result;
   },
 });
@@ -364,7 +379,7 @@ async function route(req, res, pathname) {
   }
 
   if (api === 'start' && req.method === 'POST') {
-    const result = startRecording();
+    const result = await startRecording();
     return json(res, 200, result);
   }
   // 调试模式：不开麦克风，走同一条录音/转写/建议链路。

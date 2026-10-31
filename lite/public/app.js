@@ -130,7 +130,8 @@ async function renderPrepare() {
   $('#polishBtn').onclick = async () => {
     const goal = $('#briefGoal').value.trim();
     if (!goal) return toast('先写一句目标');
-    $('#polishBtn').disabled = true;
+    const btn = $('#polishBtn');
+    btn.disabled = true; btn.textContent = '润色中…';
     try {
       const { candidates } = await api('brief/polish', {
         goal,
@@ -146,7 +147,7 @@ async function renderPrepare() {
         toast('已替换，记得保存');
       });
     } catch (e) { toast(e.message); }
-    $('#polishBtn').disabled = false;
+    btn.disabled = false; btn.textContent = '润色';
   };
 }
 
@@ -267,7 +268,21 @@ function renderLive() {
     <div id="viewTranscript" style="display:none"><div id="transcript"><div class="empty">等待说话</div></div></div>`;
   $('#stopBtn').onclick = stopRecording;
   $('#regenBtn').onclick = async () => {
-    try { await api('coach/generate', { recordingId: rid }); } catch (e) { toast(e.message); }
+    const btn = $('#regenBtn');
+    btn.disabled = true; btn.textContent = '分析中…';
+    try { await api('coach/generate', { recordingId: rid }); } catch (e) { toast(e.message); btn.disabled = false; btn.textContent = '生成'; return; }
+    // 密集轮询到结果出现（最长 90s），出现后直接展示
+    for (let i = 0; i < 45; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      let s;
+      try { s = await api(`coach/state?recordingId=${encodeURIComponent(rid)}`, undefined, 'GET'); }
+      catch { continue; }
+      const text = $('#coachStatusText');
+      if (text) text.textContent = s.running ? `分析中…（${(i + 1) * 2}s）` : s.error ? s.error : `已分析到第 ${s.throughLine} 段`;
+      if (s.latestId) { await loadAdvice(s.latestId); break; }
+      if (s.error && !s.running) break;
+    }
+    btn.disabled = false; btn.textContent = '生成';
   };
   document.querySelectorAll('#viewTabs button').forEach(btn => btn.onclick = () => {
     document.querySelectorAll('#viewTabs button').forEach(b => b.classList.toggle('active', b === btn));
@@ -481,6 +496,11 @@ window.addEventListener('hashchange', route);
 
 // SSE：实时转写与录音状态
 const events = new EventSource('/events');
+events.addEventListener('advice-progress', ev => {
+  const { chars } = JSON.parse(ev.data);
+  const el = $('#coachStatusText') || $('#debugStatus');
+  if (el && el.textContent.startsWith('分析中')) el.textContent = `正在生成（已写 ${chars} 字）…`;
+});
 events.addEventListener('transcript', ev => {
   const { entry } = JSON.parse(ev.data);
   if (location.hash === '#/debug') {
